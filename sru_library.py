@@ -44,6 +44,14 @@ class BiblioRecord:
     edition: Optional[str] = None
     raw_data: Any = None
     
+    # New fields for journal articles and more detailed metadata
+    journal_title: Optional[str] = None  # For journal articles 
+    volume: Optional[str] = None  # Volume number
+    issue: Optional[str] = None   # Issue number
+    pages: Optional[str] = None   # Page range
+    doi: Optional[str] = None     # Digital Object Identifier
+    document_type: Optional[str] = None  # Article, Book, etc.
+    
     def to_dict(self) -> Dict[str, Any]:
         """Convert record to dictionary."""
         return {
@@ -62,12 +70,32 @@ class BiblioRecord:
             "subjects": self.subjects,
             "series": self.series,
             "extent": self.extent,
-            "edition": self.edition
+            "edition": self.edition,
+            "journal_title": self.journal_title,
+            "volume": self.volume,
+            "issue": self.issue,
+            "pages": self.pages,
+            "doi": self.doi,
+            "document_type": self.document_type
         }
     
     def __str__(self) -> str:
         """String representation of the record."""
         authors_str = ", ".join(self.authors) if self.authors else "Unknown"
+        year_str = self.year or "n.d."
+        
+        # For journal articles
+        if self.journal_title:
+            journal_info = self.journal_title
+            if self.volume:
+                journal_info += f", {self.volume}"
+                if self.issue:
+                    journal_info += f"({self.issue})"
+            if self.pages:
+                journal_info += f", pp. {self.pages}"
+            return f"{self.title} by {authors_str} ({year_str}, {journal_info})"
+        
+        # For books and other materials
         pub_info = []
         if self.place_of_publication:
             pub_info.append(self.place_of_publication)
@@ -76,7 +104,7 @@ class BiblioRecord:
         
         pub_str = ": ".join(pub_info) if pub_info else "Unknown"
         
-        return f"{self.title} by {authors_str} ({self.year or 'n.d.'}, {pub_str})"
+        return f"{self.title} by {authors_str} ({year_str}, {pub_str})"
 
 
 class SRUClient:
@@ -542,6 +570,26 @@ class SRUClient:
             except Exception:
                 continue
         
+        # Try to find place of publication
+        place_of_publication = None
+        place_paths = [
+            './/marc:datafield[@tag="260"]/marc:subfield[@code="a"]',
+            './/mxc:datafield[@tag="260"]/mxc:subfield[@code="a"]',
+            './/marc:datafield[@tag="264"]/marc:subfield[@code="a"]',
+            './/mxc:datafield[@tag="264"]/mxc:subfield[@code="a"]'
+        ]
+        
+        for path in place_paths:
+            try:
+                elem = record_data.find(path, namespaces)
+                if elem is not None and elem.text:
+                    place_of_publication = elem.text.strip()
+                    # Clean up place (remove trailing punctuation)
+                    place_of_publication = re.sub(r'[,:]$', '', place_of_publication).strip()
+                    break
+            except Exception:
+                continue
+        
         # Try to find ISBN
         isbn = None
         isbn_paths = [
@@ -571,6 +619,194 @@ class SRUClient:
             except Exception:
                 continue
         
+        # Try to find ISSN
+        issn = None
+        issn_paths = [
+            './/bibo:issn',
+            './/dc:identifier[contains(text(), "ISSN")]',
+            './/marc:datafield[@tag="022"]/marc:subfield[@code="a"]',
+            './/mxc:datafield[@tag="022"]/mxc:subfield[@code="a"]',
+            './/*[local-name()="identifier" and contains(text(), "ISSN")]'
+        ]
+        
+        for path in issn_paths:
+            try:
+                elem = record_data.find(path, namespaces)
+                if elem is not None and elem.text:
+                    issn_text = elem.text.strip()
+                    # Extract ISSN
+                    match = re.search(r'(?:ISSN[:\s]*)?(\d{4}-\d{3}[\dX])', issn_text)
+                    if match:
+                        issn = match.group(1)
+                        break
+                    else:
+                        issn = issn_text
+                        break
+            except Exception:
+                continue
+        
+        # Try to find journal title (for articles)
+        journal_title = None
+        journal_paths = [
+            './/marc:datafield[@tag="773"]/marc:subfield[@code="t"]',
+            './/mxc:datafield[@tag="773"]/mxc:subfield[@code="t"]',
+            './/marc:datafield[@tag="773"]/marc:subfield[@code="p"]',
+            './/mxc:datafield[@tag="773"]/mxc:subfield[@code="p"]'
+        ]
+        
+        for path in journal_paths:
+            try:
+                elem = record_data.find(path, namespaces)
+                if elem is not None and elem.text:
+                    journal_title = elem.text.strip()
+                    break
+            except Exception:
+                continue
+        
+        # Try to find volume and issue
+        volume = None
+        issue = None
+        
+        # Volume
+        volume_paths = [
+            './/marc:datafield[@tag="773"]/marc:subfield[@code="v"]',
+            './/mxc:datafield[@tag="773"]/mxc:subfield[@code="v"]'
+        ]
+        
+        for path in volume_paths:
+            try:
+                elem = record_data.find(path, namespaces)
+                if elem is not None and elem.text:
+                    volume = elem.text.strip()
+                    break
+            except Exception:
+                continue
+        
+        # Issue
+        issue_paths = [
+            './/marc:datafield[@tag="773"]/marc:subfield[@code="l"]',
+            './/mxc:datafield[@tag="773"]/mxc:subfield[@code="l"]'
+        ]
+        
+        for path in issue_paths:
+            try:
+                elem = record_data.find(path, namespaces)
+                if elem is not None and elem.text:
+                    issue = elem.text.strip()
+                    break
+            except Exception:
+                continue
+        
+        # Try to find page range
+        pages = None
+        pages_paths = [
+            './/marc:datafield[@tag="773"]/marc:subfield[@code="g"]',
+            './/mxc:datafield[@tag="773"]/mxc:subfield[@code="g"]'
+        ]
+        
+        for path in pages_paths:
+            try:
+                elem = record_data.find(path, namespaces)
+                if elem is not None and elem.text:
+                    # Try to extract page range from various formats
+                    page_text = elem.text.strip()
+                    page_match = re.search(r'p\.?\s*(\d+(?:-\d+)?)', page_text, re.IGNORECASE)
+                    if page_match:
+                        pages = page_match.group(1)
+                    else:
+                        # Just use raw text if no pattern matched
+                        pages = page_text
+                    break
+            except Exception:
+                continue
+        
+        # Try to find extent (number of pages for books)
+        extent = None
+        extent_paths = [
+            './/marc:datafield[@tag="300"]/marc:subfield[@code="a"]',
+            './/mxc:datafield[@tag="300"]/mxc:subfield[@code="a"]'
+        ]
+        
+        for path in extent_paths:
+            try:
+                elem = record_data.find(path, namespaces)
+                if elem is not None and elem.text:
+                    extent = elem.text.strip()
+                    break
+            except Exception:
+                continue
+        
+        # Try to find DOI
+        doi = None
+        doi_paths = [
+            './/dc:identifier[contains(text(), "doi")]',
+            './/marc:datafield[@tag="024"][@ind1="7"]/marc:subfield[@code="a"][../marc:subfield[@code="2"]="doi"]',
+            './/mxc:datafield[@tag="024"][@ind1="7"]/mxc:subfield[@code="a"][../mxc:subfield[@code="2"]="doi"]'
+        ]
+        
+        for path in doi_paths:
+            try:
+                elem = record_data.find(path, namespaces)
+                if elem is not None and elem.text:
+                    doi_text = elem.text.strip()
+                    # Extract DOI 
+                    match = re.search(r'(?:doi:)?(10\.\d{4,}(?:\.\d+)*\/(?:(?!["&\'<>])\S)+)', doi_text)
+                    if match:
+                        doi = match.group(1)
+                        break
+                    else:
+                        doi = doi_text
+                        break
+            except Exception:
+                continue
+        
+        # Try to find document type
+        document_type = None
+        leader = None
+        
+        try:
+            leader_elem = record_data.find('.//marc:leader', namespaces)
+            if not leader_elem:
+                leader_elem = record_data.find('.//mxc:leader', namespaces)
+            if leader_elem is not None and leader_elem.text:
+                leader = leader_elem.text
+        except Exception:
+            pass
+        
+        if leader:
+            # Position 6 and 7 in MARC leader indicate record type and bibliographic level
+            if len(leader) >= 8:
+                record_type = leader[6]
+                biblio_level = leader[7]
+                
+                if record_type == 'a' and biblio_level == 's':
+                    document_type = 'Journal'
+                elif record_type == 'a' and biblio_level == 'm':
+                    document_type = 'Book'
+                elif record_type == 'a' and biblio_level == 'a':
+                    document_type = 'Journal Article'
+                elif record_type == 'a' and biblio_level == 'c':
+                    document_type = 'Book Chapter'
+                elif record_type == 'e':
+                    document_type = 'Map'
+                elif record_type == 'g':
+                    document_type = 'Video'
+                elif record_type == 'j':
+                    document_type = 'Music'
+                elif record_type == 'k':
+                    document_type = 'Image'
+                elif record_type == 'm':
+                    document_type = 'Computer File'
+        
+        # Infer document type from other clues if not found in leader
+        if not document_type:
+            if journal_title and (pages or volume or issue):
+                document_type = 'Journal Article'
+            elif issn:
+                document_type = 'Journal'
+            elif isbn:
+                document_type = 'Book'
+        
         # Try to find URLs
         urls = []
         url_paths = [
@@ -595,14 +831,122 @@ class SRUClient:
             except Exception:
                 continue
         
+        # Try to find subjects
+        subjects = []
+        subject_paths = [
+            './/dc:subject',
+            './/dcterms:subject',
+            './/marc:datafield[@tag="650"]/marc:subfield[@code="a"]',
+            './/mxc:datafield[@tag="650"]/mxc:subfield[@code="a"]',
+            './/marc:datafield[@tag="651"]/marc:subfield[@code="a"]',
+            './/mxc:datafield[@tag="651"]/mxc:subfield[@code="a"]',
+            './/marc:datafield[@tag="653"]/marc:subfield[@code="a"]',
+            './/mxc:datafield[@tag="653"]/mxc:subfield[@code="a"]'
+        ]
+        
+        for path in subject_paths:
+            try:
+                elems = record_data.findall(path, namespaces)
+                for elem in elems:
+                    if elem.text and elem.text.strip():
+                        subjects.append(elem.text.strip())
+            except Exception:
+                continue
+        
+        # Try to find abstract/description
+        abstract = None
+        abstract_paths = [
+            './/dc:description',
+            './/dcterms:abstract',
+            './/marc:datafield[@tag="520"]/marc:subfield[@code="a"]',
+            './/mxc:datafield[@tag="520"]/mxc:subfield[@code="a"]'
+        ]
+        
+        for path in abstract_paths:
+            try:
+                elem = record_data.find(path, namespaces)
+                if elem is not None and elem.text:
+                    abstract = elem.text.strip()
+                    break
+            except Exception:
+                continue
+        
+        # Try to find language
+        language = None
+        language_paths = [
+            './/dc:language',
+            './/dcterms:language',
+            './/marc:datafield[@tag="041"]/marc:subfield[@code="a"]',
+            './/mxc:datafield[@tag="041"]/mxc:subfield[@code="a"]'
+        ]
+        
+        for path in language_paths:
+            try:
+                elem = record_data.find(path, namespaces)
+                if elem is not None and elem.text:
+                    language = elem.text.strip()
+                    break
+            except Exception:
+                continue
+        
+        # Try to find series
+        series = None
+        series_paths = [
+            './/marc:datafield[@tag="490"]/marc:subfield[@code="a"]',
+            './/mxc:datafield[@tag="490"]/mxc:subfield[@code="a"]',
+            './/marc:datafield[@tag="830"]/marc:subfield[@code="a"]',
+            './/mxc:datafield[@tag="830"]/mxc:subfield[@code="a"]'
+        ]
+        
+        for path in series_paths:
+            try:
+                elem = record_data.find(path, namespaces)
+                if elem is not None and elem.text:
+                    series = elem.text.strip()
+                    break
+            except Exception:
+                continue
+        
+        # Try to find edition
+        edition = None
+        edition_paths = [
+            './/marc:datafield[@tag="250"]/marc:subfield[@code="a"]',
+            './/mxc:datafield[@tag="250"]/mxc:subfield[@code="a"]'
+        ]
+        
+        for path in edition_paths:
+            try:
+                elem = record_data.find(path, namespaces)
+                if elem is not None and elem.text:
+                    edition = elem.text.strip()
+                    break
+            except Exception:
+                continue
+        
+        # Create BiblioRecord with all extracted fields
         return BiblioRecord(
             id=record_id,
             title=title,
             authors=authors,
             year=year,
-            publisher=publisher,
+            publisher_name=publisher,
+            place_of_publication=place_of_publication,
             isbn=isbn,
+            issn=issn,
             urls=urls,
+            abstract=abstract,
+            language=language,
+            format=document_type,  # Use detected document_type as format
+            subjects=subjects,
+            series=series,
+            extent=extent,
+            edition=edition,
+            journal_title=journal_title,
+            volume=volume,
+            issue=issue,
+            pages=pages,
+            doi=doi,
+            document_type=document_type,
             raw_data=raw_record['raw_xml']
         )
     
@@ -638,6 +982,8 @@ def parse_dublin_core(raw_record, namespaces):
     ns = namespaces.copy()
     if 'dc' not in ns:
         ns['dc'] = 'http://purl.org/dc/elements/1.1/'
+    if 'dcterms' not in ns:
+        ns['dcterms'] = 'http://purl.org/dc/terms/'
     
     # Find title
     title_elem = data.find('.//dc:title', ns)
@@ -656,6 +1002,16 @@ def parse_dublin_core(raw_record, namespaces):
                     author = parts[0].strip()
             authors.append(author)
     
+    # Find contributors (could be editors for book chapters)
+    contributor_elems = data.findall('.//dc:contributor', ns)
+    for elem in contributor_elems:
+        if elem.text and elem.text.strip():
+            contributor = elem.text.strip()
+            # Try to identify editors
+            if 'edit' in contributor.lower() or '(ed' in contributor.lower():
+                if contributor not in authors:  # Add editors to authors list
+                    authors.append(contributor)
+    
     # Find dates
     date_elem = data.find('.//dc:date', ns)
     year = None
@@ -670,16 +1026,36 @@ def parse_dublin_core(raw_record, namespaces):
     publisher_elem = data.find('.//dc:publisher', ns)
     publisher = publisher_elem.text.strip() if publisher_elem is not None and publisher_elem.text else None
     
-    # Find identifiers (ISBN, etc.)
+    # Find identifiers (ISBN, ISSN, DOI)
     isbn = None
+    issn = None
+    doi = None
+    
     identifier_elems = data.findall('.//dc:identifier', ns)
     for elem in identifier_elems:
-        if elem.text and 'isbn' in elem.text.lower():
-            # Extract ISBN
-            match = re.search(r'(?:ISBN[:\s]*)?(\d[\d\-X]+)', elem.text)
+        if not elem.text:
+            continue
+            
+        id_text = elem.text.strip().lower()
+        
+        # Extract ISBN
+        if 'isbn' in id_text:
+            match = re.search(r'(?:isbn[:\s]*)?(\d[\d\-X]+)', id_text)
             if match:
                 isbn = match.group(1)
-                break
+                
+        # Extract ISSN
+        elif 'issn' in id_text:
+            match = re.search(r'(?:issn[:\s]*)?(\d{4}-\d{3}[\dX])', id_text)
+            if match:
+                issn = match.group(1)
+                
+        # Extract DOI
+        elif 'doi' in id_text or 'doi.org' in id_text:
+            # DOI format is flexible, but commonly 10.NNNN/rest
+            match = re.search(r'(?:doi[:\s]*)?(?:https?://doi.org/)?(\d+\.\d+/[^\s]+)', id_text)
+            if match:
+                doi = match.group(1)
     
     # Find subjects
     subjects = []
@@ -689,31 +1065,102 @@ def parse_dublin_core(raw_record, namespaces):
             subjects.append(elem.text.strip())
     
     # Find description (abstract)
+    abstract = None
     description_elem = data.find('.//dc:description', ns)
-    abstract = description_elem.text.strip() if description_elem is not None and description_elem.text else None
+    if description_elem is not None and description_elem.text:
+        abstract = description_elem.text.strip()
     
     # Find language
+    language = None
     language_elem = data.find('.//dc:language', ns)
-    language = language_elem.text.strip() if language_elem is not None and language_elem.text else None
+    if language_elem is not None and language_elem.text:
+        language = language_elem.text.strip()
     
     # Find format
+    format_str = None
     format_elem = data.find('.//dc:format', ns)
-    format_str = format_elem.text.strip() if format_elem is not None and format_elem.text else None
+    if format_elem is not None and format_elem.text:
+        format_str = format_elem.text.strip()
     
+    # Find extent (pages, etc.)
+    extent = None
+    extent_elem = data.find('.//dcterms:extent', ns)
+    if extent_elem is not None and extent_elem.text:
+        extent = extent_elem.text.strip()
+        
+        # Try to extract page range
+        pages = None
+        page_match = re.search(r'(\d+)(?:\s*[-–]\s*(\d+))?\s*p', extent)
+        if page_match:
+            if page_match.group(2):  # Range of pages
+                pages = f"{page_match.group(1)}-{page_match.group(2)}"
+            else:  # Single page count
+                pages = page_match.group(1)
+    
+    # Find source (could contain book or journal info)
+    source_elem = data.find('.//dc:source', ns)
+    source = source_elem.text.strip() if source_elem is not None and source_elem.text else None
+    
+    # Initialize journal/book related variables
+    journal_title = None
+    volume = None
+    issue = None
+    series = None
+    pages = None
+    
+    # Process source to extract journal info if available
+    if source:
+        # Check for journal pattern like "Journal Name, Vol. X, No. Y, pp. Z-W"
+        journal_match = re.search(r'([^,]+),\s*(?:Vol(?:ume)?\.?\s*(\d+))?,?\s*(?:No\.?\s*(\d+))?,?\s*(?:pp\.?\s*(\d+(?:-\d+)?))?', source)
+        if journal_match:
+            journal_title = journal_match.group(1).strip()
+            volume = journal_match.group(2)
+            issue = journal_match.group(3)
+            if journal_match.group(4):
+                pages = journal_match.group(4)
+                
+        # If not journal, might be a book chapter or series
+        elif 'in:' in source.lower() or 'in ' in source.lower():
+            book_match = re.search(r'(?:in:?|In:?)\s*([^,]+)', source)
+            if book_match:
+                series = book_match.group(1).strip()
+    
+    # Determine document type from available info
+    document_type = None
+    if journal_title and (volume or issue):
+        document_type = "Journal Article"
+    elif series:
+        document_type = "Book Chapter"
+    elif 'book' in format_str.lower() if format_str else False:
+        document_type = "Book"
+    
+    # Create and return BiblioRecord with all extracted info
     return BiblioRecord(
         id=record_id,
         title=title,
         authors=authors,
         year=year,
-        publisher=publisher,
+        publisher_name=publisher,
+        place_of_publication=None,  # Dublin Core doesn't typically have this
         isbn=isbn,
-        subjects=subjects,
+        issn=issn,
+        urls=[],  # URLs should be extracted separately
         abstract=abstract,
         language=language,
         format=format_str,
-        raw_data=raw_record['raw_xml']
+        subjects=subjects,
+        series=series,  # Use series field for book title in case of book chapter
+        extent=extent,
+        edition=None,  # Edition info not typically in basic Dublin Core
+        
+        # Journal article fields
+        journal_title=journal_title,
+        volume=volume,
+        issue=issue,
+        pages=pages,
+        doi=doi,
+        document_type=document_type
     )
-
 
 # Register parser for MARCXML format
 @SRUClient.register_parser('marcxml')
@@ -740,43 +1187,65 @@ def parse_marcxml(raw_record, namespaces):
     if record is None:
         record = data  # Use the data element as fallback
     
+    # Helper function to find datafields
+    def find_datafields(tag, code):
+        fields = record.findall(f'.//marc:datafield[@tag="{tag}"]/marc:subfield[@code="{code}"]', ns)
+        if not fields:
+            fields = record.findall(f'.//mxc:datafield[@tag="{tag}"]/mxc:subfield[@code="{code}"]', ns)
+        return [f.text.strip() for f in fields if f.text and f.text.strip()]
+    
     # Find title (MARC field 245 subfield a)
     title = "Untitled"
-    title_fields = record.findall('.//marc:datafield[@tag="245"]/marc:subfield[@code="a"]', ns)
-    if not title_fields:
-        title_fields = record.findall('.//mxc:datafield[@tag="245"]/mxc:subfield[@code="a"]', ns)
-    if title_fields and title_fields[0].text:
-        title = title_fields[0].text.strip()
+    title_fields = find_datafields("245", "a")
+    if title_fields:
+        title = title_fields[0]
         # Some titles end with / or : or other punctuation
         title = re.sub(r'[/:]$', '', title).strip()
+    
+    # Find subtitle if present (245 subfield b)
+    subtitle_fields = find_datafields("245", "b")
+    if subtitle_fields:
+        title += ": " + subtitle_fields[0].strip()
     
     # Find authors (MARC fields 100, 700)
     authors = []
     
     # Creator (100)
-    creator_fields = record.findall('.//marc:datafield[@tag="100"]/marc:subfield[@code="a"]', ns)
-    if not creator_fields:
-        creator_fields = record.findall('.//mxc:datafield[@tag="100"]/mxc:subfield[@code="a"]', ns)
-    for field in creator_fields:
-        if field.text and field.text.strip():
-            authors.append(field.text.strip())
+    creators = find_datafields("100", "a")
+    authors.extend(creators)
     
     # Contributors (700)
-    contributor_fields = record.findall('.//marc:datafield[@tag="700"]/marc:subfield[@code="a"]', ns)
-    if not contributor_fields:
-        contributor_fields = record.findall('.//mxc:datafield[@tag="700"]/mxc:subfield[@code="a"]', ns)
-    for field in contributor_fields:
-        if field.text and field.text.strip():
-            authors.append(field.text.strip())
+    contributors = find_datafields("700", "a")
+    
+    # Check for editors in 700 fields (usually indicated in subfield e)
+    editor_fields = record.findall('.//marc:datafield[@tag="700"]', ns)
+    if not editor_fields:
+        editor_fields = record.findall('.//mxc:datafield[@tag="700"]', ns)
+        
+    for field in editor_fields:
+        name_subfield = field.find('./marc:subfield[@code="a"]', ns) or field.find('./mxc:subfield[@code="a"]', ns)
+        role_subfield = field.find('./marc:subfield[@code="e"]', ns) or field.find('./mxc:subfield[@code="e"]', ns)
+        
+        if name_subfield is not None and name_subfield.text and role_subfield is not None and role_subfield.text:
+            name = name_subfield.text.strip()
+            role = role_subfield.text.strip().lower()
+            
+            if "editor" in role or "edit" in role:
+                # Add editors to authors list with role indicated
+                editor_name = f"{name} (editor)"
+                if editor_name not in authors:
+                    authors.append(editor_name)
+            else:
+                # Add to authors if not already there
+                if name not in authors:
+                    authors.append(name)
     
     # Find year (MARC field 260/264 subfield c)
     year = None
     for tag in ['260', '264']:
-        date_fields = record.findall(f'.//marc:datafield[@tag="{tag}"]/marc:subfield[@code="c"]', ns)
-        if not date_fields:
-            date_fields = record.findall(f'.//mxc:datafield[@tag="{tag}"]/mxc:subfield[@code="c"]', ns)
-        if date_fields and date_fields[0].text:
-            date_text = date_fields[0].text.strip()
+        date_fields = find_datafields(tag, "c")
+        if date_fields:
+            date_text = date_fields[0]
             # Extract year
             match = re.search(r'\b(1\d{3}|20\d{2})\b', date_text)
             if match:
@@ -786,67 +1255,196 @@ def parse_marcxml(raw_record, namespaces):
     # Find publisher (MARC field 260/264 subfield b)
     publisher = None
     for tag in ['260', '264']:
-        publisher_fields = record.findall(f'.//marc:datafield[@tag="{tag}"]/marc:subfield[@code="b"]', ns)
-        if not publisher_fields:
-            publisher_fields = record.findall(f'.//mxc:datafield[@tag="{tag}"]/mxc:subfield[@code="b"]', ns)
-        if publisher_fields and publisher_fields[0].text:
-            publisher = publisher_fields[0].text.strip()
+        publisher_fields = find_datafields(tag, "b")
+        if publisher_fields:
+            publisher = publisher_fields[0]
             # Some publishers end with , or : or other punctuation
             publisher = re.sub(r'[,:]$', '', publisher).strip()
             break
     
+    # Find place of publication (MARC field 260/264 subfield a)
+    place = None
+    for tag in ['260', '264']:
+        place_fields = find_datafields(tag, "a")
+        if place_fields:
+            place = place_fields[0]
+            # Some places end with : or other punctuation
+            place = re.sub(r':$', '', place).strip()
+            break
+    
     # Find ISBN (MARC field 020 subfield a)
     isbn = None
-    isbn_fields = record.findall('.//marc:datafield[@tag="020"]/marc:subfield[@code="a"]', ns)
-    if not isbn_fields:
-        isbn_fields = record.findall('.//mxc:datafield[@tag="020"]/mxc:subfield[@code="a"]', ns)
-    if isbn_fields and isbn_fields[0].text:
-        isbn_text = isbn_fields[0].text.strip()
+    isbn_fields = find_datafields("020", "a")
+    if isbn_fields:
+        isbn_text = isbn_fields[0]
         # Extract just the ISBN part
         match = re.search(r'(\d[\d\-X]+)', isbn_text)
         if match:
             isbn = match.group(1)
     
+    # Find ISSN (MARC field 022 subfield a)
+    issn = None
+    issn_fields = find_datafields("022", "a")
+    if issn_fields:
+        issn = issn_fields[0]
+    
+    # Find DOI (MARC field 024 subfield a, with indicator 7 and subfield 2 = doi)
+    doi = None
+    doi_fields = record.findall('.//marc:datafield[@tag="024" and @ind1="7"]/marc:subfield[@code="a"]', ns)
+    if not doi_fields:
+        doi_fields = record.findall('.//mxc:datafield[@tag="024" and @ind1="7"]/mxc:subfield[@code="a"]', ns)
+    
+    for field in doi_fields:
+        # Check for subfield 2 with value "doi"
+        parent = field.getparent()
+        subfield_2 = parent.find('./marc:subfield[@code="2"]', ns) or parent.find('./mxc:subfield[@code="2"]', ns)
+        
+        if subfield_2 is not None and subfield_2.text and subfield_2.text.strip().lower() == "doi":
+            doi = field.text.strip()
+            break
+    
     # Find subjects (MARC fields 650, 651)
     subjects = []
     for tag in ['650', '651']:
-        subject_fields = record.findall(f'.//marc:datafield[@tag="{tag}"]/marc:subfield[@code="a"]', ns)
-        if not subject_fields:
-            subject_fields = record.findall(f'.//mxc:datafield[@tag="{tag}"]/mxc:subfield[@code="a"]', ns)
-        for field in subject_fields:
-            if field.text and field.text.strip():
-                subjects.append(field.text.strip())
+        subject_fields = find_datafields(tag, "a")
+        subjects.extend(subject_fields)
     
     # Find language (MARC field 041 subfield a or 008 positions 35-37)
     language = None
-    language_fields = record.findall('.//marc:datafield[@tag="041"]/marc:subfield[@code="a"]', ns)
-    if not language_fields:
-        language_fields = record.findall('.//mxc:datafield[@tag="041"]/mxc:subfield[@code="a"]', ns)
-    if language_fields and language_fields[0].text:
-        language = language_fields[0].text.strip()
+    language_fields = find_datafields("041", "a")
+    if language_fields:
+        language = language_fields[0]
+    
+    # Find series (MARC field 490 or 830)
+    series = None
+    series_fields = find_datafields("490", "a") or find_datafields("830", "a")
+    if series_fields:
+        series = series_fields[0]
+    
+    # Find extent/pagination (MARC field 300 subfield a)
+    extent = None
+    extent_fields = find_datafields("300", "a")
+    if extent_fields:
+        extent = extent_fields[0]
+    
+    # Extract page information from extent
+    pages = None
+    if extent:
+        page_match = re.search(r'(\d+)(?:\s*[-–]\s*(\d+))?\s*p', extent)
+        if page_match:
+            if page_match.group(2):  # Range of pages
+                pages = f"{page_match.group(1)}-{page_match.group(2)}"
+            else:  # Single page count
+                pages = page_match.group(1)
+    
+    # Find edition (MARC field 250 subfield a)
+    edition = None
+    edition_fields = find_datafields("250", "a")
+    if edition_fields:
+        edition = edition_fields[0]
     
     # Find URLs (MARC field 856 subfield u)
-    urls = []
-    url_fields = record.findall('.//marc:datafield[@tag="856"]/marc:subfield[@code="u"]', ns)
-    if not url_fields:
-        url_fields = record.findall('.//mxc:datafield[@tag="856"]/mxc:subfield[@code="u"]', ns)
-    for field in url_fields:
-        if field.text and field.text.strip():
-            urls.append(field.text.strip())
+    urls = find_datafields("856", "u")
     
+    # Find if this is a journal article or book chapter
+    # Host item entry is in MARC field 773
+    host_item_fields = record.findall('.//marc:datafield[@tag="773"]', ns)
+    if not host_item_fields:
+        host_item_fields = record.findall('.//mxc:datafield[@tag="773"]', ns)
+    
+    journal_title = None
+    volume = None
+    issue = None
+    
+    for field in host_item_fields:
+        # Title of host item (journal or book title)
+        title_subfield = field.find('./marc:subfield[@code="t"]', ns) or field.find('./mxc:subfield[@code="t"]', ns)
+        if title_subfield is not None and title_subfield.text:
+            host_title = title_subfield.text.strip()
+            
+            # Volume
+            volume_subfield = field.find('./marc:subfield[@code="g"]', ns) or field.find('./mxc:subfield[@code="g"]', ns)
+            vol_text = volume_subfield.text.strip() if volume_subfield is not None and volume_subfield.text else None
+            
+            # Try to determine if this is a journal or a book
+            # Journals typically have volume, issue information
+            if vol_text and re.search(r'vol|issue|number|no\.|band', vol_text.lower()):
+                journal_title = host_title
+                
+                # Extract volume/issue from text like "vol. 10, no. 3, p. 45-67"
+                vol_match = re.search(r'vol(?:ume)?\.?\s*(\d+)', vol_text, re.IGNORECASE)
+                if vol_match:
+                    volume = vol_match.group(1)
+                
+                issue_match = re.search(r'(?:no|issue|num)\.?\s*(\d+)', vol_text, re.IGNORECASE)
+                if issue_match:
+                    issue = issue_match.group(1)
+                
+                # Extract page range
+                page_match = re.search(r'p(?:age)?s?\.?\s*(\d+)(?:\s*[-–]\s*(\d+))?', vol_text, re.IGNORECASE)
+                if page_match:
+                    if page_match.group(2):  # Range
+                        pages = f"{page_match.group(1)}-{page_match.group(2)}"
+                    else:  # Single page
+                        pages = page_match.group(1)
+            else:
+                # Likely a book chapter - use series field
+                series = host_title
+    
+    # Determine document type
+    document_type = None
+    if journal_title:
+        document_type = "Journal Article"
+    elif series and not journal_title:
+        document_type = "Book Chapter"
+    else:
+        # Leader position 6 often indicates material type
+        leader = record.find('./marc:leader', ns)
+        if leader is None:
+            leader = record.find('./mxc:leader', ns)
+        
+        if leader is not None and leader.text:
+            material_type = leader.text[6] if len(leader.text) > 6 else None
+            if material_type == 'a':  # Language material
+                document_type = "Book"
+            elif material_type == 'e':  # Printed music
+                document_type = "Score"
+            elif material_type == 'g':  # Projected medium
+                document_type = "Visual Material"
+            elif material_type == 'i':  # Nonmusical sound recording
+                document_type = "Audio Recording"
+            elif material_type == 'j':  # Musical sound recording
+                document_type = "Music Recording"
+            elif material_type == 'm':  # Computer file
+                document_type = "Electronic Resource"
+    
+    # Create BiblioRecord
     return BiblioRecord(
         id=record_id,
         title=title,
         authors=authors,
         year=year,
-        publisher=publisher,
+        publisher_name=publisher,
+        place_of_publication=place,
         isbn=isbn,
-        subjects=subjects,
-        language=language,
+        issn=issn,
         urls=urls,
-        raw_data=raw_record['raw_xml']
+        abstract=None,  # MARC doesn't typically have abstracts in basic records
+        language=language,
+        format=document_type,  # Use determined document type
+        subjects=subjects,
+        series=series,  # For book chapters, store the book title in series field
+        extent=extent,
+        edition=edition,
+        
+        # Journal article fields
+        journal_title=journal_title,
+        volume=volume,
+        issue=issue,
+        pages=pages,
+        doi=doi,
+        document_type=document_type
     )
-
 
 # Register parser for RDF/XML format
 @SRUClient.register_parser('RDFxml')
@@ -854,6 +1452,9 @@ def parse_rdfxml(raw_record, namespaces):
     """Parse RDF/XML format records (like those from DNB)."""
     data = raw_record['data']
     record_id = raw_record.get('id', 'unknown')
+    
+    # Debug log to see what we're parsing
+    logger.debug(f"Parsing RDFxml record {record_id}")
     
     # Complete set of namespaces for RDF records
     ns = {
@@ -880,25 +1481,32 @@ def parse_rdfxml(raw_record, namespaces):
             if k not in ns:
                 ns[k] = v
     
+    # Log raw data for verbose debugging
+    logger.debug(f"Raw record data for {record_id}:")
+    logger.debug(raw_record['raw_xml'][:500] + "..." if len(raw_record['raw_xml']) > 500 else raw_record['raw_xml'])
+    
     # Find description element
     desc = data.find('.//rdf:Description', ns)
     if desc is None:
         logger.warning(f"No RDF:Description found in record {record_id}")
         return None
     
-    # Find title
+    # Find title - direct approach 
+    title = "Untitled"
     title_elem = desc.find('./dc:title', ns)
-    if title_elem is None:
-        title_elem = desc.find('./dcterms:title', ns)
-    title = title_elem.text.strip() if title_elem is not None and title_elem.text else "Untitled"
+    if title_elem is not None and title_elem.text:
+        title = title_elem.text.strip()
+        logger.debug(f"Found title: {title}")
+    else:
+        logger.warning(f"No title found for record {record_id}")
     
     # Find alternative titles
     alt_title_elem = desc.find('./dcterms:alternative', ns)
     if alt_title_elem is not None and alt_title_elem.text:
         alt_title = alt_title_elem.text.strip()
-        if alt_title:
-            if ":" not in title:
-                title = f"{title}: {alt_title}"
+        if alt_title and ":" not in title:
+            title = f"{title}: {alt_title}"
+            logger.debug(f"Added alternative title, full title is now: {title}")
     
     # Find authors with improved handling to avoid duplicates
     authors = []
@@ -910,27 +1518,70 @@ def parse_rdfxml(raw_record, namespaces):
         name = re.sub(r',\s*$', '', name.strip())
         return name
     
-    # Find authors from P60327 (author statement)
+    # Process P60327 field (contributor statement) with improved parsing
+    # This field often contains multiple authors and role descriptions
     author_statement = desc.find('./rdau:P60327', ns)
     if author_statement is not None and author_statement.text:
-        # Parse author statement which may contain multiple authors
         statement_text = author_statement.text.strip()
-        # Split on common separators
-        potential_authors = re.split(r',\s*|\s*;\s*|\s+und\s+|\s+and\s+', statement_text)
-        for author in potential_authors:
-            clean_name = clean_author_name(author)
-            if clean_name and clean_name not in seen_authors:
-                authors.append(clean_name)
-                seen_authors.add(clean_name)
+        logger.debug(f"Author statement (P60327): {statement_text}")
+        
+        # Check for common patterns that indicate editorial roles rather than authorship
+        if "herausgegeben von" in statement_text:
+            # Extract the actual authors from the editorial statement
+            # Example: "herausgegeben von Stefan Tobler und Judith Povilus"
+            editor_match = re.search(r'herausgegeben von\s+(.+?)(?:;|$)', statement_text)
+            if editor_match:
+                editors = editor_match.group(1).strip()
+                # Split by "und" or "and" or commas
+                editor_names = re.split(r'\s+(?:und|and)\s+|,\s*', editors)
+                logger.debug(f"Found editors in statement: {editor_names}")
+                for name in editor_names:
+                    if name and name.strip():
+                        clean_name = clean_author_name(name)
+                        if clean_name and clean_name not in seen_authors:
+                            # Add as editor
+                            authors.append(f"{clean_name} (editor)")
+                            seen_authors.add(clean_name)
+                            logger.debug(f"Added editor: {clean_name}")
+        elif "Übers." in statement_text or "Übertragung" in statement_text:
+            # Extract translators
+            # Example: "Übers. aus dem Ital.: Dietlinde Assmus. Sprecherin: Anja Buczkowski"
+            trans_match = re.search(r'(?:Übers|Übertragung)[^:]+:\s*([^\.]+)', statement_text)
+            if trans_match:
+                translator = trans_match.group(1).strip()
+                if translator and translator not in seen_authors:
+                    authors.append(f"{translator} (translator)")
+                    seen_authors.add(translator)
+                    logger.debug(f"Added translator: {translator}")
+                    
+            # Also look for other roles like speaker
+            speaker_match = re.search(r'Sprecherin?:\s*([^\.]+)', statement_text)
+            if speaker_match:
+                speaker = speaker_match.group(1).strip()
+                if speaker and speaker not in seen_authors:
+                    authors.append(f"{speaker} (speaker)")
+                    seen_authors.add(speaker)
+                    logger.debug(f"Added speaker: {speaker}")
+        else:
+            # Normal case - split by standard separators
+            potential_authors = re.split(r',\s*|\s*;\s*|\s+und\s+|\s+and\s+', statement_text)
+            logger.debug(f"Split author statement into: {potential_authors}")
+            for author in potential_authors:
+                clean_name = clean_author_name(author)
+                if clean_name and clean_name not in seen_authors:
+                    authors.append(clean_name)
+                    seen_authors.add(clean_name)
+                    logger.debug(f"Added author: {clean_name}")
     
     # Extract authors from creator elements
+    creator_count = 0
     for creator_path in ['./dcterms:creator', './dc:creator']:
         creator_elems = desc.findall(creator_path, ns)
         for creator_elem in creator_elems:
-            # Check if it's a reference to another element
+            creator_count += 1
             creator_resource = creator_elem.get('{'+ns['rdf']+'}resource')
             if creator_resource:
-                # Try to find the referenced resource in the document
+                logger.debug(f"Found creator resource: {creator_resource}")
                 creator_desc = data.find(f'.//rdf:Description[@rdf:about="{creator_resource}"]', ns)
                 if creator_desc is not None:
                     name_elem = creator_desc.find('./gndo:preferredName', ns)
@@ -939,6 +1590,16 @@ def parse_rdfxml(raw_record, namespaces):
                         if author_name not in seen_authors:
                             authors.append(author_name)
                             seen_authors.add(author_name)
+                            logger.debug(f"Added author from resource: {author_name}")
+                continue
+                
+            # If creator contains text directly
+            if creator_elem.text and creator_elem.text.strip():
+                author_name = clean_author_name(creator_elem.text)
+                if author_name not in seen_authors:
+                    authors.append(author_name)
+                    seen_authors.add(author_name)
+                    logger.debug(f"Added author from text: {author_name}")
                 continue
                 
             # If creator contains nested elements
@@ -949,17 +1610,21 @@ def parse_rdfxml(raw_record, namespaces):
                     if author_name not in seen_authors:
                         authors.append(author_name)
                         seen_authors.add(author_name)
+                        logger.debug(f"Added author from nested element: {author_name}")
                     break
     
+    logger.debug(f"Found {creator_count} creator elements")
+    
     # Extract authors from marcRole elements
-    author_roles = ['aut', 'cre', 'edt']
+    marcRole_count = 0
+    author_roles = ['aut', 'cre']
     for role in author_roles:
         role_elems = desc.findall(f'./marcRole:{role}', ns)
         for role_elem in role_elems:
-            # Check if it's a reference
+            marcRole_count += 1
             resource = role_elem.get('{'+ns['rdf']+'}resource')
             if resource:
-                # Find the referenced element
+                logger.debug(f"Found marcRole:{role} resource: {resource}")
                 author_desc = data.find(f'.//rdf:Description[@rdf:about="{resource}"]', ns)
                 if author_desc is not None:
                     name_elem = author_desc.find('./gndo:preferredName', ns)
@@ -968,6 +1633,7 @@ def parse_rdfxml(raw_record, namespaces):
                         if author_name not in seen_authors:
                             authors.append(author_name)
                             seen_authors.add(author_name)
+                            logger.debug(f"Added author from marcRole:{role}: {author_name}")
                 continue
                 
             # Handle nested description elements
@@ -978,10 +1644,12 @@ def parse_rdfxml(raw_record, namespaces):
                     if author_name not in seen_authors:
                         authors.append(author_name)
                         seen_authors.add(author_name)
+                        logger.debug(f"Added author from nested marcRole:{role}: {author_name}")
                         
-            # Handle node ID references (common in DNB records)
+            # Handle node ID references
             node_id = role_elem.get('{'+ns['rdf']+'}nodeID')
             if node_id:
+                logger.debug(f"Found marcRole:{role} nodeID: {node_id}")
                 node_desc = data.find(f'.//rdf:Description[@rdf:nodeID="{node_id}"]', ns)
                 if node_desc is not None:
                     name_elem = node_desc.find('./gndo:preferredName', ns)
@@ -990,6 +1658,43 @@ def parse_rdfxml(raw_record, namespaces):
                         if author_name not in seen_authors:
                             authors.append(author_name)
                             seen_authors.add(author_name)
+                            logger.debug(f"Added author from marcRole:{role} nodeID: {author_name}")
+    
+    logger.debug(f"Found {marcRole_count} marcRole elements for authors")
+    
+    # Editor roles
+    editor_count = 0
+    editor_roles = ['edt']
+    for role in editor_roles:
+        role_elems = desc.findall(f'./marcRole:{role}', ns)
+        for role_elem in role_elems:
+            editor_count += 1
+            resource = role_elem.get('{'+ns['rdf']+'}resource')
+            if resource:
+                logger.debug(f"Found marcRole:{role} resource: {resource}")
+                editor_desc = data.find(f'.//rdf:Description[@rdf:about="{resource}"]', ns)
+                if editor_desc is not None:
+                    name_elem = editor_desc.find('./gndo:preferredName', ns)
+                    if name_elem is not None and name_elem.text:
+                        editor_name = clean_author_name(name_elem.text) + " (editor)"
+                        if editor_name not in seen_authors:
+                            authors.append(editor_name)
+                            seen_authors.add(editor_name)
+                            logger.debug(f"Added editor from marcRole:{role}: {editor_name}")
+                continue
+                
+            # Handle nested elements
+            for node_desc in role_elem.findall('./rdf:Description', ns):
+                name_elem = node_desc.find('./gndo:preferredName', ns)
+                if name_elem is not None and name_elem.text:
+                    editor_name = clean_author_name(name_elem.text) + " (editor)"
+                    if editor_name not in seen_authors:
+                        authors.append(editor_name)
+                        seen_authors.add(editor_name)
+                        logger.debug(f"Added editor from nested marcRole:{role}: {editor_name}")
+    
+    logger.debug(f"Found {editor_count} marcRole elements for editors")
+    logger.debug(f"Final author list: {authors}")
     
     # Find year
     year = None
@@ -999,12 +1704,14 @@ def parse_rdfxml(raw_record, namespaces):
         match = re.search(r'\b(1\d{3}|20\d{2})\b', issued_elem.text)
         if match:
             year = match.group(1)
+            logger.debug(f"Found year: {year}")
     
     # Find publisher - separately handling name and place
     publisher_name = None
     publisher_elem = desc.find('./dc:publisher', ns)
     if publisher_elem is not None and publisher_elem.text:
         publisher_name = publisher_elem.text.strip()
+        logger.debug(f"Found publisher: {publisher_name}")
     
     # Find place of publication
     places = []
@@ -1014,55 +1721,129 @@ def parse_rdfxml(raw_record, namespaces):
             places.append(place_elem.text.strip())
     
     place_of_publication = ", ".join(places) if places else None
+    if place_of_publication:
+        logger.debug(f"Found place of publication: {place_of_publication}")
     
     # Check for publication statement that might have both
     pub_statement = desc.find('./rdau:P60333', ns)
     if pub_statement is not None and pub_statement.text:
         statement = pub_statement.text.strip()
-        # If we don't already have separate place/publisher, try to parse from statement
+        logger.debug(f"Found publication statement: {statement}")
         if not place_of_publication or not publisher_name:
-            # Try to split on ": " which often separates place from publisher
             parts = statement.split(" : ", 1)
             if len(parts) > 1:
                 if not place_of_publication:
                     place_of_publication = parts[0].strip()
+                    logger.debug(f"Extracted place from statement: {place_of_publication}")
                 if not publisher_name:
-                    # Further process publisher name to remove year
                     pub_part = parts[1].strip()
-                    # Remove year in brackets at the end
                     pub_part = re.sub(r',?\s*\[\d{4}\]$', '', pub_part)
                     publisher_name = pub_part
+                    logger.debug(f"Extracted publisher from statement: {publisher_name}")
     
     # Find edition
     edition = None
     edition_elem = desc.find('./bibo:edition', ns)
     if edition_elem is not None and edition_elem.text:
         edition = edition_elem.text.strip()
+        logger.debug(f"Found edition: {edition}")
     
     # Find extent (number of pages, etc.)
     extent = None
-    extent_elem = desc.find('./isbd:P1053', ns)
+    extent_elem = desc.find('./isbd:P1053', ns) or desc.find('./dcterms:extent', ns)
     if extent_elem is not None and extent_elem.text:
         extent = extent_elem.text.strip()
+        logger.debug(f"Found extent: {extent}")
     
-    # Find series
+    # Try to extract page info from extent
+    pages = None
+    if extent:
+        page_match = re.search(r'(\d+)(?:\s*[-–]\s*(\d+))?\s*(?:p|pages|S)', extent, re.IGNORECASE)
+        if page_match:
+            if page_match.group(2):  # Range
+                pages = f"{page_match.group(1)}-{page_match.group(2)}"
+            else:  # Single page count
+                pages = page_match.group(1)
+            logger.debug(f"Extracted pages from extent: {pages}")
+    
+    # Find document type
+    document_type = None
+    type_elem = desc.find('./dcterms:type', ns) or desc.find('./dc:type', ns)
+    if type_elem is not None:
+        # Check for resource reference
+        resource = type_elem.get('{'+ns['rdf']+'}resource')
+        if resource:
+            # Extract type from URI
+            type_parts = resource.split('/')
+            if type_parts:
+                document_type = type_parts[-1]
+                logger.debug(f"Found document type from resource: {document_type}")
+        # Or direct text
+        elif type_elem.text:
+            document_type = type_elem.text.strip()
+            logger.debug(f"Found document type from text: {document_type}")
+    
+    # Find series and journal info
     series = None
-    series_elem = desc.find('./dcterms:isPartOf', ns)
-    citation_elem = desc.find('./dcterms:bibliographicCitation', ns)
+    journal_title = None
+    volume = None
+    issue = None
     
+    # Check for series
+    series_elem = desc.find('./dcterms:isPartOf', ns)
     if series_elem is not None:
-        # Check if it's a text value
+        # Text content
         if series_elem.text:
             series = series_elem.text.strip()
-        # Or a resource reference
+            logger.debug(f"Found series: {series}")
+        # Resource reference
         else:
             resource = series_elem.get('{'+ns['rdf']+'}resource')
             if resource:
-                series_parts = resource.split('/')
-                if series_parts:
-                    series = series_parts[-1]
-    elif citation_elem is not None and citation_elem.text:
-        series = citation_elem.text.strip()
+                logger.debug(f"Found series resource: {resource}")
+                # Find the referenced resource
+                series_desc = data.find(f'.//rdf:Description[@rdf:about="{resource}"]', ns)
+                if series_desc is not None:
+                    # Try to get the title
+                    title_elem = series_desc.find('./dc:title', ns) or series_desc.find('./dcterms:title', ns)
+                    if title_elem is not None and title_elem.text:
+                        series = title_elem.text.strip()
+                        logger.debug(f"Extracted series from resource: {series}")
+    
+    # Check for biblio:Journal relation
+    journal_elem = desc.find('./bibo:Journal', ns)
+    if journal_elem is not None:
+        resource = journal_elem.get('{'+ns['rdf']+'}resource')
+        if resource:
+            logger.debug(f"Found journal resource: {resource}")
+            # Find the referenced resource
+            journal_desc = data.find(f'.//rdf:Description[@rdf:about="{resource}"]', ns)
+            if journal_desc is not None:
+                # Try to get the title
+                title_elem = journal_desc.find('./dc:title', ns) or journal_desc.find('./dcterms:title', ns)
+                if title_elem is not None and title_elem.text:
+                    journal_title = title_elem.text.strip()
+                    document_type = "Journal Article"
+                    logger.debug(f"Found journal title: {journal_title}")
+    
+    # Volume and issue
+    volume_elem = desc.find('./bibo:volume', ns)
+    if volume_elem is not None and volume_elem.text:
+        volume = volume_elem.text.strip()
+        logger.debug(f"Found volume: {volume}")
+    
+    issue_elem = desc.find('./bibo:issue', ns)
+    if issue_elem is not None and issue_elem.text:
+        issue = issue_elem.text.strip()
+        logger.debug(f"Found issue: {issue}")
+    
+    # Check if this is a book chapter
+    chapter_elem = desc.find('./bibo:chapter', ns)
+    if chapter_elem is not None or (document_type and "chapter" in document_type.lower()):
+        document_type = "Book Chapter"
+        logger.debug("Determined document is a book chapter")
+        
+        # Series field will be used for book title
     
     # Find ISBN
     isbn = None
@@ -1070,6 +1851,7 @@ def parse_rdfxml(raw_record, namespaces):
         isbn_elem = desc.find(f'./bibo:{isbn_field}', ns)
         if isbn_elem is not None and isbn_elem.text:
             isbn = isbn_elem.text.strip()
+            logger.debug(f"Found ISBN ({isbn_field}): {isbn}")
             break
     
     # Find ISSN
@@ -1077,36 +1859,35 @@ def parse_rdfxml(raw_record, namespaces):
     issn_elem = desc.find('./bibo:issn', ns)
     if issn_elem is not None and issn_elem.text:
         issn = issn_elem.text.strip()
+        logger.debug(f"Found ISSN: {issn}")
     
-    # Find identifiers
-    identifiers = []
-    id_elems = desc.findall('./dc:identifier', ns)
-    for elem in id_elems:
-        if elem.text and elem.text.strip():
-            identifiers.append(elem.text.strip())
+    # Find DOI
+    doi = None
+    doi_elem = desc.find('./bibo:doi', ns)
+    if doi_elem is not None and doi_elem.text:
+        doi = doi_elem.text.strip()
+        logger.debug(f"Found DOI: {doi}")
     
     # Find subjects
     subjects = []
     seen_subjects = set()
-    # Check subject references
     subject_elems = desc.findall('./dcterms:subject', ns)
     for elem in subject_elems:
-        # If it's a reference
         resource = elem.get('{'+ns['rdf']+'}resource')
         if resource:
-            # Extract subject from URI
             subject = resource.split('/')[-1]
             if subject and subject not in seen_subjects:
                 subjects.append(subject)
                 seen_subjects.add(subject)
+                logger.debug(f"Found subject from resource: {subject}")
                 continue
         
-        # If it has text content
         if elem.text and elem.text.strip():
             subject = elem.text.strip()
             if subject not in seen_subjects:
                 subjects.append(subject)
                 seen_subjects.add(subject)
+                logger.debug(f"Found subject from text: {subject}")
     
     # Also check dc:subject
     dc_subject_elems = desc.findall('./dc:subject', ns)
@@ -1116,21 +1897,23 @@ def parse_rdfxml(raw_record, namespaces):
             if subject not in seen_subjects:
                 subjects.append(subject)
                 seen_subjects.add(subject)
+                logger.debug(f"Found dc:subject: {subject}")
+    
+    logger.debug(f"Found {len(subjects)} subjects")
     
     # Find language
     language = None
     language_elem = desc.find('./dcterms:language', ns)
     if language_elem is not None:
-        # If it's a reference
         resource = language_elem.get('{'+ns['rdf']+'}resource')
         if resource:
-            # Extract language code from the URI
             parts = resource.split('/')
             if parts:
                 language = parts[-1]
-        # If it has text content
+                logger.debug(f"Found language from resource: {language}")
         elif language_elem.text and language_elem.text.strip():
             language = language_elem.text.strip()
+            logger.debug(f"Found language from text: {language}")
     
     # Find abstract/description
     abstract = None
@@ -1139,6 +1922,7 @@ def parse_rdfxml(raw_record, namespaces):
             desc_elem = desc.find(f'./{ns_prefix}:{desc_tag}', ns)
             if desc_elem is not None and desc_elem.text:
                 abstract = desc_elem.text.strip()
+                logger.debug(f"Found abstract from {ns_prefix}:{desc_tag}: {abstract[:100]}...")
                 break
         if abstract:
             break
@@ -1147,30 +1931,31 @@ def parse_rdfxml(raw_record, namespaces):
     urls = []
     seen_urls = set()
     
-    # Check primaryTopic links
     for primaryTopic_elem in desc.findall('./foaf:primaryTopic', ns):
         resource = primaryTopic_elem.get('{'+ns['rdf']+'}resource')
         if resource and resource.startswith('http') and resource not in seen_urls:
             urls.append(resource)
             seen_urls.add(resource)
+            logger.debug(f"Found URL from primaryTopic: {resource}")
     
-    # Check umbel:isLike links
     for like_elem in desc.findall('./umbel:isLike', ns):
         resource = like_elem.get('{'+ns['rdf']+'}resource')
         if resource and resource.startswith('http') and resource not in seen_urls:
             urls.append(resource)
             seen_urls.add(resource)
+            logger.debug(f"Found URL from isLike: {resource}")
     
-    # Find format
-    format_type = None
-    format_elem = desc.find('./dcterms:format', ns)
-    if format_elem is not None:
-        resource = format_elem.get('{'+ns['rdf']+'}resource')
-        if resource:
-            format_type = resource.split('/')[-1]
-        elif format_elem.text:
-            format_type = format_elem.text.strip()
+    logger.debug(f"Found {len(urls)} URLs")
     
+    # Log record summary
+    logger.debug(f"Record summary for {record_id}:")
+    logger.debug(f"  Title: {title}")
+    logger.debug(f"  Author count: {len(authors)}")
+    logger.debug(f"  Year: {year}")
+    logger.debug(f"  Publisher: {publisher_name}")
+    logger.debug(f"  Type: {document_type}")
+    
+    # Create and return BiblioRecord
     return BiblioRecord(
         id=record_id,
         title=title,
@@ -1183,12 +1968,19 @@ def parse_rdfxml(raw_record, namespaces):
         urls=urls,
         abstract=abstract,
         language=language,
-        format=format_type,
+        format=document_type,
         subjects=subjects,
         series=series,
         extent=extent,
         edition=edition,
-        raw_data=raw_record['raw_xml']
+        
+        # Journal article fields
+        journal_title=journal_title,
+        volume=volume,
+        issue=issue,
+        pages=pages,
+        doi=doi,
+        document_type=document_type
     )
 
 # List of commonly used SRU endpoints

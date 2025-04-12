@@ -24,6 +24,7 @@ import unicodedata
 # Import library modules
 from sru_library import SRUClient, BiblioRecord, SRU_ENDPOINTS
 from oai_pmh_library import OAIClient, OAI_ENDPOINTS
+from ixtheo_library import IxTheoSearchHandler, IXTHEO_ENDPOINTS
 
 # Try to import optional dependencies
 try:
@@ -43,13 +44,13 @@ logger = logging.getLogger("library_search")
 
 def list_endpoints(protocol=None):
     """Display information about available endpoints."""
-    if protocol and protocol not in ['sru', 'oai', 'zotero']:
+    if protocol and protocol not in ['sru', 'oai', 'zotero', 'ixtheo']:
         logger.error(f"Unknown protocol: {protocol}")
-        logger.info("Valid protocols are: sru, oai, zotero")
+        logger.info("Valid protocols are: sru, oai, zotero, ixtheo")
         return
     
     if not protocol or protocol == 'sru':
-        print("\nAvailable SRU Endpoints:\n")
+        print("\\nAvailable SRU Endpoints:\\n")
         print(f"{'ID':<10} {'Name':<40} {'Version':<10}")
         print("-" * 60)
         
@@ -57,7 +58,7 @@ def list_endpoints(protocol=None):
             print(f"{id:<10} {info['name']:<40} {info.get('version', '1.1'):<10}")
     
     if not protocol or protocol == 'oai':
-        print("\nAvailable OAI-PMH Endpoints:\n")
+        print("\\nAvailable OAI-PMH Endpoints:\\n")
         print(f"{'ID':<12} {'Name':<40} {'Metadata Format':<16}")
         print("-" * 70)
         
@@ -65,14 +66,35 @@ def list_endpoints(protocol=None):
             print(f"{id:<12} {info['name']:<40} {info.get('default_metadata_prefix', 'oai_dc'):<16}")
     
     if not protocol or protocol == 'zotero':
-        print("\nZotero Search:")
+        print("\\nZotero Search:")
         print("-" * 60)
         print("To search a local Zotero database:")
         print("  --protocol zotero --zotero-path /path/to/zotero/zotero.sqlite")
-        print("\nTo search a Zotero library via API (requires API key):")
+        print("\\nTo search a Zotero library via API (requires API key):")
         print("  --protocol zotero --zotero-api-key YOUR_API_KEY --zotero-library-id LIBRARY_ID --zotero-library-type [user|group]")
     
-    print("\nUse --info <endpoint_id> for more details about a specific endpoint.")
+    if not protocol or protocol == 'ixtheo':
+        print("\\nIxTheo (Index Theologicus) Endpoint:")
+        print("-" * 60)
+        print(f"{'ID':<10} {'Name':<40} {'Description':<30}")
+        print("-" * 80)
+        
+        for id, info in IXTHEO_ENDPOINTS.items():
+            print(f"{id:<10} {info['name']:<40} {info['description']:<30}")
+        
+        print("\\nAvailable formats for filtering:")
+        for id, info in IXTHEO_ENDPOINTS.items():
+            if info.get('formats'):
+                print(f"  {', '.join(info['formats'])}")
+                break
+        
+        print("\\nAvailable languages for filtering:")
+        for id, info in IXTHEO_ENDPOINTS.items():
+            if info.get('languages'):
+                print(f"  {', '.join(info['languages'])}")
+                break
+    
+    print("\\nUse --info <endpoint_id> for more details about a specific endpoint.")
 
 
 def show_endpoint_info(endpoint_id):
@@ -80,14 +102,14 @@ def show_endpoint_info(endpoint_id):
     # Check SRU endpoints
     if endpoint_id in SRU_ENDPOINTS:
         info = SRU_ENDPOINTS[endpoint_id]
-        print(f"\n{info['name']} ({endpoint_id}) - SRU Protocol")
+        print(f"\\n{info['name']} ({endpoint_id}) - SRU Protocol")
         print("=" * 50)
         print(f"URL: {info['url']}")
         print(f"Default Schema: {info.get('default_schema', 'None')}")
         print(f"SRU Version: {info.get('version', '1.1')}")
         print(f"Description: {info.get('description', 'No description available')}")
         
-        print("\nExample Queries:")
+        print("\\nExample Queries:")
         for query_type, example in info.get('examples', {}).items():
             if isinstance(example, dict):
                 # For advanced queries stored as dictionaries
@@ -101,33 +123,59 @@ def show_endpoint_info(endpoint_id):
     # Check OAI-PMH endpoints
     if endpoint_id in OAI_ENDPOINTS:
         info = OAI_ENDPOINTS[endpoint_id]
-        print(f"\n{info['name']} ({endpoint_id}) - OAI-PMH Protocol")
+        print(f"\\n{info['name']} ({endpoint_id}) - OAI-PMH Protocol")
         print("=" * 50)
         print(f"URL: {info['url']}")
         print(f"Default Metadata Format: {info.get('default_metadata_prefix', 'oai_dc')}")
         print(f"Description: {info.get('description', 'No description available')}")
         
         if info.get('sets'):
-            print("\nAvailable Sets:")
+            print("\\nAvailable Sets:")
             for set_id, set_desc in info['sets'].items():
                 print(f"  {set_id}: {set_desc}")
         
-        print("\nUsage Example:")
+        print("\\nUsage Example:")
         print(f"  --endpoint {endpoint_id} --title 'Python' --protocol oai")
         print(f"  --endpoint {endpoint_id} --set {list(info.get('sets', {}).keys())[0] if info.get('sets') else 'NONE'} --protocol oai")
         
         return
     
+    # Check IxTheo endpoints
+    if endpoint_id in IXTHEO_ENDPOINTS:
+        info = IXTHEO_ENDPOINTS[endpoint_id]
+        print(f"\\n{info['name']} ({endpoint_id}) - Specialized Theological Database")
+        print("=" * 60)
+        print(f"URL: {info['url']}")
+        print(f"Description: {info['description']}")
+        
+        if info.get('formats'):
+            print("\\nAvailable Formats for Filtering:")
+            print(f"  {', '.join(info['formats'])}")
+        
+        if info.get('languages'):
+            print("\\nAvailable Languages for Filtering:")
+            print(f"  {', '.join(info['languages'])}")
+        
+        if info.get('export_formats'):
+            print("\\nSupported Export Formats:")
+            print(f"  {', '.join(info['export_formats'])}")
+        
+        print("\\nUsage Example:")
+        print(f"  --endpoint {endpoint_id} --title 'Bible' --protocol ixtheo --format-filter 'Article'")
+        print(f"  --endpoint {endpoint_id} --author 'Smith' --protocol ixtheo --language-filter 'English' --get-export")
+        
+        return
+    
     # If it's Zotero, show Zotero info
     if endpoint_id.lower() == 'zotero':
-        print("\nZotero - Local database or API")
+        print("\\nZotero - Local database or API")
         print("=" * 50)
         print("Zotero is a reference management software to manage bibliographic data.")
-        print("\nTo search a local Zotero database:")
+        print("\\nTo search a local Zotero database:")
         print("  --protocol zotero --zotero-path /path/to/zotero/zotero.sqlite --title 'Python'")
-        print("\nTo search a Zotero library via API (requires API key):")
+        print("\\nTo search a Zotero library via API (requires API key):")
         print("  --protocol zotero --zotero-api-key YOUR_API_KEY --zotero-library-id LIBRARY_ID --zotero-library-type [user|group] --title 'Python'")
-        print("\nFor more information on Zotero API, visit: https://www.zotero.org/support/dev/web_api/v3/start")
+        print("\\nFor more information on Zotero API, visit: https://www.zotero.org/support/dev/web_api/v3/start")
         return
     
     # Not found in either
@@ -374,12 +422,21 @@ def format_record_bibtex(record):
     Returns:
         BibTeX formatted string
     """
-    # Determine entry type
+    # Determine entry type based on record format/type
     entry_type = "book"  # default
-    if record.issn:
+    
+    # For journal articles
+    if record.format == "Journal Article" or record.journal_title:
         entry_type = "article"
-    elif record.series:
+    # For book chapters
+    elif record.format == "Book Chapter" or record.format == "CHAP":
         entry_type = "incollection"
+    # For conference papers
+    elif record.format == "Conference Paper":
+        entry_type = "inproceedings"
+    # For theses
+    elif record.format and ("thesis" in record.format.lower() or "dissertation" in record.format.lower()):
+        entry_type = "phdthesis"
     
     # Create citation key from first author and year
     first_author = record.authors[0] if record.authors else "unknown"
@@ -387,19 +444,26 @@ def format_record_bibtex(record):
     
     # Extract last name for the key
     if ',' in first_author:
-        last_name = first_author.split(',')[0].strip()
+        last_name = first_author.split(',')[0].strip().lower()
+        # Remove spaces and non-ascii characters
+        last_name = re.sub(r'\W+', '', last_name)
     else:
         parts = first_author.split()
-        last_name = parts[-1] if parts else "unknown"
+        last_name = parts[-1].lower() if parts else "unknown"
+        # Remove spaces and non-ascii characters
+        last_name = re.sub(r'\W+', '', last_name)
     
-    # Create a clean citation key
-    citation_key = f"{clean_key(last_name)}{year}"
+    # Create citation key
+    citation_key = f"{last_name}{year}"
     
     # Start building BibTeX entry
     bibtex = [f"@{entry_type}{{{citation_key},"]
     
     # Add required fields
-    bibtex.append(f"  title = {{{bibtex_escape(record.title)}}},")
+    if record.title:
+        # Escape special characters in title
+        title = record.title.replace("&", "\\&").replace("%", "\\%")
+        bibtex.append(f"  title = {{{title}}},")
     
     # Format authors
     if record.authors:
@@ -408,16 +472,16 @@ def format_record_bibtex(record):
         for author in record.authors:
             # Check if already in "lastname, firstname" format
             if ',' in author:
-                formatted_authors.append(bibtex_escape(author))
+                formatted_authors.append(author)
             else:
                 # Assume "firstname lastname" format and convert
                 parts = author.split()
                 if len(parts) > 1:
                     last_name = parts[-1]
                     first_names = ' '.join(parts[:-1])
-                    formatted_authors.append(f"{bibtex_escape(last_name)}, {bibtex_escape(first_names)}")
+                    formatted_authors.append(f"{last_name}, {first_names}")
                 else:
-                    formatted_authors.append(bibtex_escape(author))
+                    formatted_authors.append(author)
         
         bibtex.append(f"  author = {{{' and '.join(formatted_authors)}}},")
     
@@ -425,47 +489,84 @@ def format_record_bibtex(record):
     if record.year:
         bibtex.append(f"  year = {{{record.year}}},")
     
-    # Add publisher
-    if record.publisher_name:
-        bibtex.append(f"  publisher = {{{bibtex_escape(record.publisher_name)}}},")
+    # Journal-specific fields (for articles)
+    if entry_type == "article":
+        if record.journal_title:
+            bibtex.append(f"  journal = {{{record.journal_title}}},")
+        
+        if record.volume:
+            bibtex.append(f"  volume = {{{record.volume}}},")
+        
+        if record.issue:
+            bibtex.append(f"  number = {{{record.issue}}},")
+        
+        # Extract pages from extent field if available
+        pages = None
+        if record.extent and "Pages" in record.extent:
+            page_match = re.search(r'Pages\s+(\d+(?:-\d+)?)', record.extent)
+            if page_match:
+                pages = page_match.group(1).replace('-', '--')  # BibTeX uses -- for ranges
+        
+        if pages:
+            bibtex.append(f"  pages = {{{pages}}},")
     
-    # Add address (place of publication)
-    if record.place_of_publication:
-        bibtex.append(f"  address = {{{bibtex_escape(record.place_of_publication)}}},")
+    # Book chapter specific fields
+    elif entry_type == "incollection":
+        # Add book title (from series)
+        if record.series:
+            bibtex.append(f"  booktitle = {{{record.series}}},")
+        
+        # Add editor if available
+        series_editor = None
+        if isinstance(record.raw_data, dict) and 'series_editor' in record.raw_data:
+            series_editor = record.raw_data['series_editor']
+        
+        if series_editor:
+            bibtex.append(f"  editor = {{{series_editor}}},")
+        
+        # Add publisher
+        if record.publisher_name:
+            bibtex.append(f"  publisher = {{{record.publisher_name}}},")
+        
+        # Add address (place of publication)
+        if record.place_of_publication:
+            bibtex.append(f"  address = {{{record.place_of_publication}}},")
+        
+        # Extract pages from extent field
+        pages = None
+        if record.extent and "Pages" in record.extent:
+            page_match = re.search(r'Pages\s+(\d+(?:-\d+)?)', record.extent)
+            if page_match:
+                pages = page_match.group(1).replace('-', '--')  # BibTeX uses -- for ranges
+        
+        if pages:
+            bibtex.append(f"  pages = {{{pages}}},")
+    else:
+        # Add publisher for other types
+        if record.publisher_name:
+            bibtex.append(f"  publisher = {{{record.publisher_name}}},")
+        
+        # Add address (place of publication)
+        if record.place_of_publication:
+            bibtex.append(f"  address = {{{record.place_of_publication}}},")
+        
+        # Add series for books
+        if record.series:
+            bibtex.append(f"  series = {{{record.series}}},")
     
     # Add ISBN
     if record.isbn:
         bibtex.append(f"  isbn = {{{record.isbn}}},")
     
-    # Add ISSN for articles
+    # Add ISSN for journals
     if record.issn:
         bibtex.append(f"  issn = {{{record.issn}}},")
     
     # Add edition
     if record.edition:
-        bibtex.append(f"  edition = {{{bibtex_escape(record.edition)}}},")
+        bibtex.append(f"  edition = {{{record.edition}}},")
     
-    # Add series
-    if record.series:
-        bibtex.append(f"  series = {{{bibtex_escape(record.series)}}},")
-    
-    # Add volume (from extent if available)
-    if record.extent and "volume" in record.extent.lower():
-        volume_match = re.search(r'volume\s+(\d+)', record.extent.lower())
-        if volume_match:
-            bibtex.append(f"  volume = {{{volume_match.group(1)}}},")
-    
-    # Add URL if available
-    if record.urls:
-        bibtex.append(f"  url = {{{record.urls[0]}}},")
-    
-    # Add abstract
-    if record.abstract:
-        # Limit abstract length to avoid issues
-        abstract = record.abstract[:500] + "..." if len(record.abstract) > 500 else record.abstract
-        bibtex.append(f"  abstract = {{{bibtex_escape(abstract)}}},")
-    
-    # Add language
+    # Add language if available
     if record.language:
         bibtex.append(f"  language = {{{record.language}}},")
     
@@ -723,7 +824,116 @@ def format_record(record, format_type='text', include_raw=False, verbose=False):
     
     return "\n".join(result)
 
-
+def search_ixtheo_endpoint(args):
+    """
+    Search the IxTheo endpoint with the given parameters.
+    
+    Args:
+        args: Command line arguments
+        
+    Returns:
+        True if search was successful, False otherwise
+    """
+    endpoint_id = args.endpoint
+    if endpoint_id not in IXTHEO_ENDPOINTS:
+        logger.error(f"Unknown IxTheo endpoint: {endpoint_id}")
+        logger.info("Use --list --protocol ixtheo to see available IxTheo endpoints")
+        return False
+    
+    # Get endpoint info
+    endpoint_info = IXTHEO_ENDPOINTS[endpoint_id]
+    logger.info(f"Using {endpoint_info['name']} ({endpoint_id}) via IxTheo protocol")
+    
+    # Create IxTheo search handler
+    ixtheo_handler = IxTheoSearchHandler(
+        timeout=args.timeout,
+        debug=args.verbose,
+        verify_ssl=not args.no_verify_ssl
+    )
+    
+    # Perform search
+    logger.info(f"Searching IxTheo with parameters:")
+    if args.title:
+        logger.info(f"  Title: {args.title}")
+    if args.author:
+        logger.info(f"  Author: {args.author}")
+    if args.subject:
+        logger.info(f"  Subject: {args.subject}")
+    if args.format_filter:
+        logger.info(f"  Format filter: {args.format_filter}")
+    if args.language_filter:
+        logger.info(f"  Language filter: {args.language_filter}")
+    
+    start_time = time.time()
+    
+    try:
+        # Execute search
+        total_results, records = ixtheo_handler.search(
+            query=args.advanced,
+            title=args.title,
+            author=args.author,
+            subject=args.subject,
+            max_results=args.max_records,
+            format_filter=args.format_filter,
+            language_filter=args.language_filter
+        )
+        
+        end_time = time.time()
+        search_time = end_time - start_time
+        
+        if total_results == 0 or not records:
+            logger.warning("No results found")
+            return False
+        
+        logger.info(f"Found {total_results} results, showing {len(records)} ({search_time:.2f} seconds)")
+        
+        # If we need to get export data for each record
+        if args.get_export:
+            logger.info(f"Retrieving {args.format.upper()} export data for each record...")
+            
+            # Map output format to IxTheo export format
+            export_format_map = {
+                'bibtex': 'BibTeX',
+                'ris': 'RIS',
+                'marc': 'MARC',
+                'text': 'BibTeX',  # Default for text output
+                'json': 'BibTeX',  # Default for JSON output
+                'zotero': 'BibTeX'  # Default for Zotero output
+            }
+            
+            export_format = export_format_map.get(args.format.lower(), 'BibTeX')
+            
+            # Get export data for each record
+            for i, record in enumerate(records):
+                if args.verbose:
+                    print(f"Getting export data for record {i+1}/{len(records)}...")
+                
+                records[i] = ixtheo_handler.get_record_with_export(record, export_format)
+        
+        # Handle output to file if specified
+        if args.output:
+            return save_results_to_file(records, args.output, args.format, args.raw, args.verbose)
+        
+        # Display results
+        for i, record in enumerate(records, 1):
+            print(f"\n--- Result {i} of {len(records)} ---")
+            print(format_record(record, args.format, args.raw, args.verbose))
+        
+        # Show pagination info if applicable
+        if total_results > len(records):
+            remaining = total_results - len(records)
+            if remaining > 0:
+                print(f"\nThere are approximately {remaining} more results available.")
+                print("Use --max-records to adjust the number of results returned.")
+        
+        return True
+    
+    except Exception as e:
+        logger.error(f"Error performing IxTheo search: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+    
 def search_sru_endpoint(args):
     """
     Search a library SRU endpoint with the given parameters.
@@ -1472,7 +1682,7 @@ def explore_endpoint(args):
 def parse_args():
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
-        description='Search library SRU and OAI-PMH endpoints for books, journals, and other materials.',
+        description='Search library SRU, OAI-PMH and specialized endpoints for books, journals, and other materials.',
         epilog='Example: library_search.py --endpoint dnb --title "Python Programming" --protocol sru'
     )
     
@@ -1487,7 +1697,7 @@ def parse_args():
                         help='Explore available sets and metadata formats for an OAI-PMH endpoint')
     
     # Protocol selection
-    parser.add_argument('--protocol', choices=['sru', 'oai', 'zotero'], default='sru',
+    parser.add_argument('--protocol', choices=['sru', 'oai', 'zotero', 'ixtheo'], default='sru',
                         help='Protocol to use (default: sru)')
     
     # Custom endpoint creation
@@ -1505,6 +1715,7 @@ def parse_args():
     search_group.add_argument('--isbn', help='Search by ISBN')
     search_group.add_argument('--issn', help='Search by ISSN')
     search_group.add_argument('--year', help='Search by publication year')
+    search_group.add_argument('--subject', help='Search by subject/topic')
     search_group.add_argument('--advanced', 
                               help='Advanced search with custom query string or JSON parameters')
     search_group.add_argument('--max-records', type=int, default=10,
@@ -1539,6 +1750,16 @@ def parse_args():
     zotero_group.add_argument('--zotero-library-type', choices=['user', 'group'], default='user',
                           help='Zotero library type (user or group)')
     
+    # IxTheo specific parameters
+    ixtheo_group = parser.add_argument_group('IxTheo Parameters')
+    ixtheo_group.add_argument('--format-filter',
+                           help='Filter by format (e.g., "Article", "Book")')
+    ixtheo_group.add_argument('--language-filter',
+                           help='Filter by language (e.g., "German", "English")')
+    ixtheo_group.add_argument('--get-export',
+                           action='store_true',
+                           help='Retrieve export data for each record')
+    
     # Output format
     output_group = parser.add_argument_group('Output Parameters')
     output_group.add_argument('--format', choices=['text', 'json', 'bibtex', 'ris', 'zotero'], default='text',
@@ -1553,6 +1774,8 @@ def parse_args():
                         help='Request timeout in seconds')
     parser.add_argument('--verbose', '-v', action='store_true',
                         help='Enable verbose output')
+    parser.add_argument('--no-verify-ssl', action='store_true',
+                        help='Disable SSL certificate verification')
     
     args = parser.parse_args()
     
@@ -1603,7 +1826,7 @@ def main():
     
     # Check if any search criteria were specified
     if not any([
-        args.title, args.author, args.isbn, args.issn, args.year, args.advanced,
+        args.title, args.author, args.isbn, args.issn, args.year, args.subject, args.advanced,
         # OAI-PMH specific criteria can also be valid search parameters
         (args.protocol == 'oai' and (args.set or args.from_date or args.until_date))
     ]):
@@ -1617,9 +1840,11 @@ def main():
         success = search_oai_endpoint(args)
     elif args.protocol == 'zotero':
         success = search_zotero(args)
+    elif args.protocol == 'ixtheo':
+        success = search_ixtheo_endpoint(args)
     else:
         logger.error(f"Unknown protocol: {args.protocol}")
-        logger.info("Valid protocols are: sru, oai, zotero")
+        logger.info("Valid protocols are: sru, oai, zotero, ixtheo")
         success = False
     
     sys.exit(0 if success else 1)
