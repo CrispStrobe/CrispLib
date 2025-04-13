@@ -13,7 +13,7 @@ import urllib.parse
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Any, Optional, Union, Tuple, Callable
+from typing import Dict, List, Any, Optional, Union, Tuple, Callable, Set
 import re
 
 # Configure logging
@@ -28,7 +28,11 @@ class BiblioRecord:
     """Data class for bibliographic records."""
     id: str
     title: str
+    # Separate authors and editors
     authors: List[str] = field(default_factory=list)
+    editors: List[str] = field(default_factory=list)  # New field for editors
+    translators: List[str] = field(default_factory=list)  # New field for translators
+    contributors: List[Dict[str, str]] = field(default_factory=list)  # People with specific roles
     year: Optional[str] = None
     publisher_name: Optional[str] = None
     place_of_publication: Optional[str] = None
@@ -43,8 +47,9 @@ class BiblioRecord:
     extent: Optional[str] = None  # Number of pages, duration, etc.
     edition: Optional[str] = None
     raw_data: Any = None
+    schema: Optional[str] = None  # Store the schema used for parsing
     
-    # New fields for journal articles and more detailed metadata
+    # Journal related fields
     journal_title: Optional[str] = None  # For journal articles 
     volume: Optional[str] = None  # Volume number
     issue: Optional[str] = None   # Issue number
@@ -58,6 +63,9 @@ class BiblioRecord:
             "id": self.id,
             "title": self.title,
             "authors": self.authors,
+            "editors": self.editors,
+            "translators": self.translators,
+            "contributors": self.contributors,
             "year": self.year,
             "publisher_name": self.publisher_name,
             "place_of_publication": self.place_of_publication,
@@ -76,12 +84,21 @@ class BiblioRecord:
             "issue": self.issue,
             "pages": self.pages,
             "doi": self.doi,
-            "document_type": self.document_type
+            "document_type": self.document_type,
+            "schema": self.schema
         }
     
     def __str__(self) -> str:
         """String representation of the record."""
-        authors_str = ", ".join(self.authors) if self.authors else "Unknown"
+        authors_str = ", ".join(self.authors) if self.authors else ""
+        editors_str = ", ".join(self.editors) if self.editors else ""
+        credit_parts = []
+        if authors_str:
+            credit_parts.append(f"by {authors_str}")
+        if editors_str:
+            credit_parts.append(f"edited by {editors_str}")
+        
+        credit = " ".join(credit_parts) if credit_parts else "Unknown"
         year_str = self.year or "n.d."
         
         # For journal articles
@@ -93,7 +110,7 @@ class BiblioRecord:
                     journal_info += f"({self.issue})"
             if self.pages:
                 journal_info += f", pp. {self.pages}"
-            return f"{self.title} by {authors_str} ({year_str}, {journal_info})"
+            return f"{self.title} {credit} ({year_str}, {journal_info})"
         
         # For books and other materials
         pub_info = []
@@ -104,7 +121,38 @@ class BiblioRecord:
         
         pub_str = ": ".join(pub_info) if pub_info else "Unknown"
         
-        return f"{self.title} by {authors_str} ({year_str}, {pub_str})"
+        return f"{self.title} {credit} ({year_str}, {pub_str})"
+
+    def get_citation_key(self) -> str:
+        """Generate a sensible BibTeX citation key."""
+        # Get first author's last name or 'unknown' if no authors
+        if self.authors:
+            # Extract last name (after the last comma or the whole name if no comma)
+            first_author = self.authors[0]
+            if ',' in first_author:
+                author_key = first_author.split(',')[0].strip().lower()
+            else:
+                # Take the last word as the last name
+                parts = first_author.split()
+                author_key = parts[-1].lower() if parts else 'unknown'
+        elif self.editors:
+            # Use first editor if no authors
+            first_editor = self.editors[0]
+            if ',' in first_editor:
+                author_key = first_editor.split(',')[0].strip().lower()
+            else:
+                parts = first_editor.split()
+                author_key = parts[-1].lower() if parts else 'editor'
+        else:
+            author_key = 'unknown'
+        
+        # Remove any non-alphanumeric characters
+        author_key = re.sub(r'[^a-z0-9]', '', author_key)
+        
+        # Add year if available
+        if self.year:
+            return f"{author_key}{self.year}"
+        return author_key
 
 
 class SRUClient:
@@ -347,7 +395,7 @@ class SRUClient:
             for record_elem in record_elems:
                 # Get record schema
                 schema_elem = record_elem.find('.//srw:recordSchema', namespaces)
-                record_schema = schema_elem.text if schema_elem is not None else None
+                record_schema = schema_elem.text.strip() if schema_elem is not None and schema_elem.text else None
                 
                 # Get record data
                 record_data_elem = record_elem.find('.//srw:recordData', namespaces)
@@ -404,8 +452,22 @@ class SRUClient:
             return total, []
         
         records = []
+        existing_ids = set()  # Track existing record IDs to avoid duplicates
+        
         for raw_record in raw_records:
             try:
+                # Ensure record ID is unique
+                record_id = raw_record.get('id', f"record-{len(records)+1}")
+                if record_id in existing_ids:
+                    i = 1
+                    new_id = f"{record_id}_{i}"
+                    while new_id in existing_ids:
+                        i += 1
+                        new_id = f"{record_id}_{i}"
+                    record_id = new_id
+                existing_ids.add(record_id)
+                raw_record['id'] = record_id
+                
                 # Determine the parser to use
                 parser = self.custom_parser
                 if not parser and raw_record['schema'] in self.parsers:
@@ -416,7 +478,7 @@ class SRUClient:
                     try:
                         record = parser(raw_record, self.namespaces)
                     except Exception as e:
-                        logger.warning(f"Error in custom parser for record {raw_record.get('id', 'unknown')}: {e}")
+                        logger.warning(f"Error in custom parser for record {record_id}: {e}")
                         # Fall back to generic parser
                         record = self._generic_parse(raw_record, self.namespaces)
                 else:
@@ -424,14 +486,17 @@ class SRUClient:
                     record = self._generic_parse(raw_record, self.namespaces)
                     
                 if record:
+                    # Ensure record has the correct ID and schema
+                    record.id = record_id
+                    record.schema = raw_record.get('schema')
                     records.append(record)
                 else:
                     # Make a minimal record if all parsing failed
-                    record_id = raw_record.get('id', f"record-{len(records)+1}")
                     min_record = BiblioRecord(
                         id=record_id,
                         title=f"Unparseable Record {record_id}",
-                        raw_data=raw_record['raw_xml']
+                        raw_data=raw_record['raw_xml'],
+                        schema=raw_record.get('schema')
                     )
                     records.append(min_record)
                     logger.debug(f"Created minimal record for {record_id} due to parsing failure")
@@ -440,6 +505,15 @@ class SRUClient:
                 logger.error(f"Error handling record {raw_record.get('id', 'unknown')}: {e}")
                 # Make a minimal record despite the error
                 record_id = raw_record.get('id', f"record-{len(records)+1}")
+                if record_id in existing_ids:
+                    i = 1
+                    new_id = f"{record_id}_{i}"
+                    while new_id in existing_ids:
+                        i += 1
+                        new_id = f"{record_id}_{i}"
+                    record_id = new_id
+                existing_ids.add(record_id)
+                
                 try:
                     # Try to extract title from raw XML as a last resort
                     title_match = re.search(r'<dc:title[^>]*>(.*?)</dc:title>', raw_record['raw_xml'], re.DOTALL)
@@ -450,7 +524,8 @@ class SRUClient:
                 min_record = BiblioRecord(
                     id=record_id,
                     title=title,
-                    raw_data=raw_record['raw_xml']
+                    raw_data=raw_record['raw_xml'],
+                    schema=raw_record.get('schema')
                 )
                 records.append(min_record)
         
@@ -497,6 +572,11 @@ class SRUClient:
         
         # Try to find authors
         authors = []
+        editors = []
+        translators = []
+        contributors = []
+        
+        # Extract creators/authors
         author_paths = [
             './/dc:creator',
             './/dcterms:creator',
@@ -509,12 +589,45 @@ class SRUClient:
             './/*[local-name()="author"]'
         ]
         
+        seen_names = set()  # Track seen names to avoid duplicates
+        
         for path in author_paths:
             try:
                 elems = record_data.findall(path, namespaces)
                 for elem in elems:
                     if elem.text and elem.text.strip():
-                        authors.append(elem.text.strip())
+                        name = elem.text.strip()
+                        
+                        # Check if it's an editor
+                        if re.search(r'\b(?:ed(?:itor)?|hrsg|hg)\b', name.lower(), re.IGNORECASE) or "(ed" in name.lower() or "(hg" in name.lower() or "(hg.)" in name.lower():
+
+                            # Clean editor name by removing role designation
+
+                            clean_name = re.sub(r'\s*[\(\[][^)]*(?:ed|hrsg|edit|hg)[^)]*[\)\]]', '', name)
+                            clean_name = re.sub(r'\s*(?:ed|hrsg|edit|hg)\.?(?:\s+|$)', '', clean_name)
+                            clean_name = clean_name.strip()
+                            
+                            if clean_name and clean_name not in seen_names:
+                                editors.append(clean_name)
+                                seen_names.add(clean_name)
+                            continue
+                        
+                        # Check if it's a translator
+                        if re.search(r'\b(?:trans|transl|translator|übersetz|übers)\b', name.lower(), re.IGNORECASE):
+                            # Clean translator name
+                            clean_name = re.sub(r'\s*[\(\[][^)]*(?:trans|übersetz)[^)]*[\)\]]', '', name)
+                            clean_name = re.sub(r'\s*(?:trans|transl|translator|übersetz|übers)\.?(?:\s+|$)', '', clean_name)
+                            clean_name = clean_name.strip()
+                            
+                            if clean_name and clean_name not in seen_names:
+                                translators.append(clean_name)
+                                seen_names.add(clean_name)
+                            continue
+                            
+                        # Regular author
+                        if name not in seen_names:
+                            authors.append(name)
+                            seen_names.add(name)
             except Exception:
                 continue
         
@@ -744,18 +857,18 @@ class SRUClient:
             './/mxc:datafield[@tag="024"][@ind1="7"]/mxc:subfield[@code="a"][../mxc:subfield[@code="2"]="doi"]'
         ]
         
-        for path in doi_paths:
+        # Fixed implementation for finding DOI that doesn't use getparent()
+        for path in ['.//marc:datafield[@tag="024"][@ind1="7"]', './/mxc:datafield[@tag="024"][@ind1="7"]']:
             try:
-                elem = record_data.find(path, namespaces)
-                if elem is not None and elem.text:
-                    doi_text = elem.text.strip()
-                    # Extract DOI 
-                    match = re.search(r'(?:doi:)?(10\.\d{4,}(?:\.\d+)*\/(?:(?!["&\'<>])\S)+)', doi_text)
-                    if match:
-                        doi = match.group(1)
-                        break
-                    else:
-                        doi = doi_text
+                fields = record_data.findall(path, namespaces)
+                for field in fields:
+                    type_subfield = field.find('./marc:subfield[@code="2"]', namespaces) or field.find('./mxc:subfield[@code="2"]', namespaces)
+                    value_subfield = field.find('./marc:subfield[@code="a"]', namespaces) or field.find('./mxc:subfield[@code="a"]', namespaces)
+                    
+                    if (type_subfield is not None and type_subfield.text 
+                            and type_subfield.text.strip().lower() == "doi" 
+                            and value_subfield is not None and value_subfield.text):
+                        doi = value_subfield.text.strip()
                         break
             except Exception:
                 continue
@@ -928,6 +1041,9 @@ class SRUClient:
             id=record_id,
             title=title,
             authors=authors,
+            editors=editors,
+            translators=translators,
+            contributors=contributors,
             year=year,
             publisher_name=publisher,
             place_of_publication=place_of_publication,
@@ -947,7 +1063,8 @@ class SRUClient:
             pages=pages,
             doi=doi,
             document_type=document_type,
-            raw_data=raw_record['raw_xml']
+            raw_data=raw_record['raw_xml'],
+            schema=raw_record.get('schema')
         )
     
     def _extract_text(self, elem: ET.Element, xpath_list: List[str], 
@@ -989,28 +1106,84 @@ def parse_dublin_core(raw_record, namespaces):
     title_elem = data.find('.//dc:title', ns)
     title = title_elem.text.strip() if title_elem is not None and title_elem.text else "Untitled"
     
-    # Find authors
+    # Find authors and contributors with proper separation
     authors = []
+    editors = []
+    translators = []
+    contributors = []
+    
+    # Keep track of seen names to avoid duplicates
+    seen_names = set()
+    
+    # Process creators (authors)
     creator_elems = data.findall('.//dc:creator', ns)
     for elem in creator_elems:
         if elem.text and elem.text.strip():
-            # Remove roles like "Author" if present
-            author = elem.text.strip()
-            if '.' in author:
-                parts = author.split('.')
-                if len(parts) > 1:
-                    author = parts[0].strip()
-            authors.append(author)
+            name = elem.text.strip()
+            
+            # Check if it's an editor
+            if re.search(r'\b(?:ed(?:itor)?|hrsg|hg|edit\.)\b', name.lower(), re.IGNORECASE) or "(ed" in name.lower():
+                # Clean editor name by removing role designation
+                clean_name = re.sub(r'\s*[\(\[][^)]*(?:ed|hrsg|edit|hg)[^)]*[\)\]]', '', name)
+                clean_name = re.sub(r'\s*(?:ed|hrsg|edit|hg)\.?(?:\s+|$)', '', clean_name)
+                clean_name = clean_name.strip()
+                
+                if clean_name and clean_name not in seen_names:
+                    editors.append(clean_name)
+                    seen_names.add(clean_name)
+                continue
+                
+            # Check if it's a translator
+            if re.search(r'\b(?:trans|transl|translator|übersetz|übers)\b', name.lower(), re.IGNORECASE):
+                # Clean translator name
+                clean_name = re.sub(r'\s*[\(\[][^)]*(?:trans|übersetz)[^)]*[\)\]]', '', name)
+                clean_name = re.sub(r'\s*(?:trans|transl|translator|übersetz|übers)\.?(?:\s+|$)', '', clean_name)
+                clean_name = clean_name.strip()
+                
+                if clean_name and clean_name not in seen_names:
+                    translators.append(clean_name)
+                    seen_names.add(clean_name)
+                continue
+                
+            # Regular author (not an editor or translator)
+            if name not in seen_names:
+                authors.append(name)
+                seen_names.add(name)
     
-    # Find contributors (could be editors for book chapters)
+    # Process contributors (could be editors for book chapters)
     contributor_elems = data.findall('.//dc:contributor', ns)
     for elem in contributor_elems:
         if elem.text and elem.text.strip():
             contributor = elem.text.strip()
-            # Try to identify editors
-            if 'edit' in contributor.lower() or '(ed' in contributor.lower():
-                if contributor not in authors:  # Add editors to authors list
-                    authors.append(contributor)
+            
+            # Check if it's an editor
+            if re.search(r'\b(?:ed(?:itor)?|hrsg|hg)\b', contributor.lower(), re.IGNORECASE) or "(ed" in contributor.lower():
+                # Clean editor name
+                clean_name = re.sub(r'\s*[\(\[][^)]*(?:ed|hrsg|edit|hg)[^)]*[\)\]]', '', contributor)
+                clean_name = re.sub(r'\s*(?:ed|hrsg|edit|hg)\.?(?:\s+|$)', '', clean_name)
+                clean_name = clean_name.strip()
+                
+                if clean_name and clean_name not in seen_names:
+                    editors.append(clean_name)
+                    seen_names.add(clean_name)
+                continue
+                
+            # Check if it's a translator
+            if re.search(r'\b(?:trans|transl|translator|übersetz|übers)\b', contributor.lower(), re.IGNORECASE):
+                # Clean translator name
+                clean_name = re.sub(r'\s*[\(\[][^)]*(?:trans|übersetz)[^)]*[\)\]]', '', contributor)
+                clean_name = re.sub(r'\s*(?:trans|transl|translator|übersetz|übers)\.?(?:\s+|$)', '', clean_name)
+                clean_name = clean_name.strip()
+                
+                if clean_name and clean_name not in seen_names:
+                    translators.append(clean_name)
+                    seen_names.add(clean_name)
+                continue
+                
+            # Other contributors with no specific role identified
+            if contributor not in seen_names:
+                contributors.append({"name": contributor, "role": "contributor"})
+                seen_names.add(contributor)
     
     # Find dates
     date_elem = data.find('.//dc:date', ns)
@@ -1139,6 +1312,9 @@ def parse_dublin_core(raw_record, namespaces):
         id=record_id,
         title=title,
         authors=authors,
+        editors=editors,
+        translators=translators,
+        contributors=contributors,
         year=year,
         publisher_name=publisher,
         place_of_publication=None,  # Dublin Core doesn't typically have this
@@ -1159,7 +1335,8 @@ def parse_dublin_core(raw_record, namespaces):
         issue=issue,
         pages=pages,
         doi=doi,
-        document_type=document_type
+        document_type=document_type,
+        schema=raw_record.get('schema')
     )
 
 # Register parser for MARCXML format
@@ -1179,20 +1356,36 @@ def parse_marcxml(raw_record, namespaces):
         ns['mxc'] = 'info:lc/xmlns/marcxchange-v2'
     
     # Find record element (which might be nested differently depending on the source)
-    record = data.find('.//marc:record', ns)
-    if record is None:
-        record = data.find('.//mxc:record', ns)
-    if record is None:
-        record = data.find('.//*[local-name()="record"]')
-    if record is None:
-        record = data  # Use the data element as fallback
+    record = data
+    
+    # Check if data element is already a record element
+    marc_record_tags = [
+        '{http://www.loc.gov/MARC21/slim}record',
+        '{info:lc/xmlns/marcxchange-v2}record'
+    ]
+    
+    if not any(record.tag == tag for tag in marc_record_tags):
+        # Try to find record element if data is not already a record
+        for prefix in ['marc', 'mxc']:
+            record_elem = data.find(f'.//{prefix}:record', ns)
+            if record_elem is not None:
+                record = record_elem
+                break
+                
+        # If still not found, try with local-name
+        if record == data:
+            record_elem = data.find('.//*[local-name()="record"]')
+            if record_elem is not None:
+                record = record_elem
     
     # Helper function to find datafields
     def find_datafields(tag, code):
-        fields = record.findall(f'.//marc:datafield[@tag="{tag}"]/marc:subfield[@code="{code}"]', ns)
-        if not fields:
-            fields = record.findall(f'.//mxc:datafield[@tag="{tag}"]/mxc:subfield[@code="{code}"]', ns)
-        return [f.text.strip() for f in fields if f.text and f.text.strip()]
+        fields = []
+        for prefix in ['marc', 'mxc']:
+            elems = record.findall(f'.//{prefix}:datafield[@tag="{tag}"]/{prefix}:subfield[@code="{code}"]', ns)
+            if elems:
+                fields.extend([f.text.strip() for f in elems if f.text and f.text.strip()])
+        return fields
     
     # Find title (MARC field 245 subfield a)
     title = "Untitled"
@@ -1207,38 +1400,81 @@ def parse_marcxml(raw_record, namespaces):
     if subtitle_fields:
         title += ": " + subtitle_fields[0].strip()
     
-    # Find authors (MARC fields 100, 700)
+    # Find authors, editors, translators, and other contributors with proper separation
     authors = []
+    editors = []
+    translators = []
+    contributors = []
+    
+    # Keep track of seen names to avoid duplicates
+    seen_names = set()
     
     # Creator (100)
-    creators = find_datafields("100", "a")
-    authors.extend(creators)
+    for prefix in ['marc', 'mxc']:
+        creator_fields = record.findall(f'.//{prefix}:datafield[@tag="100"]', ns)
+        for field in creator_fields:
+            name_subfield = field.find(f'./{prefix}:subfield[@code="a"]', ns)
+            if name_subfield is not None and name_subfield.text:
+                name = name_subfield.text.strip()
+                # Check for role in subfield e
+                role_subfield = field.find(f'./{prefix}:subfield[@code="e"]', ns)
+                role = role_subfield.text.strip().lower() if role_subfield is not None and role_subfield.text else ''
+                
+                if role:
+                    if any(r in role for r in ['edit', 'hrsg', 'hg']):
+                        if name not in seen_names:
+                            editors.append(name)
+                            seen_names.add(name)
+                    elif any(r in role for r in ['transl', 'übers']):
+                        if name not in seen_names:
+                            translators.append(name)
+                            seen_names.add(name)
+                    else:
+                        # Other contributor role
+                        if name not in seen_names:
+                            contributors.append({"name": name, "role": role})
+                            seen_names.add(name)
+                else:
+                    # No specific role, assume author
+                    if name not in seen_names:
+                        authors.append(name)
+                        seen_names.add(name)
     
     # Contributors (700)
-    contributors = find_datafields("700", "a")
+    for prefix in ['marc', 'mxc']:
+        contributor_fields = record.findall(f'.//{prefix}:datafield[@tag="700"]', ns)
+        for field in contributor_fields:
+            name_subfield = field.find(f'./{prefix}:subfield[@code="a"]', ns)
+            if name_subfield is not None and name_subfield.text:
+                name = name_subfield.text.strip()
+                # Check for role in subfield e
+                role_subfield = field.find(f'./{prefix}:subfield[@code="e"]', ns)
+                role = role_subfield.text.strip().lower() if role_subfield is not None and role_subfield.text else ''
+                
+                if role:
+                    if any(r in role for r in ['edit', 'hrsg', 'hg']):
+                        if name not in seen_names:
+                            editors.append(name)
+                            seen_names.add(name)
+                    elif any(r in role for r in ['transl', 'übers']):
+                        if name not in seen_names:
+                            translators.append(name)
+                            seen_names.add(name)
+                    else:
+                        # Other contributor role
+                        if name not in seen_names:
+                            contributors.append({"name": name, "role": role})
+                            seen_names.add(name)
+                else:
+                    # No specific role, assume author/contributor
+                    if name not in seen_names:
+                        authors.append(name)
+                        seen_names.add(name)
     
-    # Check for editors in 700 fields (usually indicated in subfield e)
-    editor_fields = record.findall('.//marc:datafield[@tag="700"]', ns)
-    if not editor_fields:
-        editor_fields = record.findall('.//mxc:datafield[@tag="700"]', ns)
-        
-    for field in editor_fields:
-        name_subfield = field.find('./marc:subfield[@code="a"]', ns) or field.find('./mxc:subfield[@code="a"]', ns)
-        role_subfield = field.find('./marc:subfield[@code="e"]', ns) or field.find('./mxc:subfield[@code="e"]', ns)
-        
-        if name_subfield is not None and name_subfield.text and role_subfield is not None and role_subfield.text:
-            name = name_subfield.text.strip()
-            role = role_subfield.text.strip().lower()
-            
-            if "editor" in role or "edit" in role:
-                # Add editors to authors list with role indicated
-                editor_name = f"{name} (editor)"
-                if editor_name not in authors:
-                    authors.append(editor_name)
-            else:
-                # Add to authors if not already there
-                if name not in authors:
-                    authors.append(name)
+    # If no authors but we have editors, use editors
+    if not authors and editors:
+        # We'll leave editors in editors field, they'll be displayed as "edited by"
+        pass
     
     # Find year (MARC field 260/264 subfield c)
     year = None
@@ -1290,18 +1526,17 @@ def parse_marcxml(raw_record, namespaces):
     
     # Find DOI (MARC field 024 subfield a, with indicator 7 and subfield 2 = doi)
     doi = None
-    doi_fields = record.findall('.//marc:datafield[@tag="024" and @ind1="7"]/marc:subfield[@code="a"]', ns)
-    if not doi_fields:
-        doi_fields = record.findall('.//mxc:datafield[@tag="024" and @ind1="7"]/mxc:subfield[@code="a"]', ns)
-    
-    for field in doi_fields:
-        # Check for subfield 2 with value "doi"
-        parent = field.getparent()
-        subfield_2 = parent.find('./marc:subfield[@code="2"]', ns) or parent.find('./mxc:subfield[@code="2"]', ns)
-        
-        if subfield_2 is not None and subfield_2.text and subfield_2.text.strip().lower() == "doi":
-            doi = field.text.strip()
-            break
+    for prefix in ['marc', 'mxc']:
+        doi_fields = record.findall(f'.//{prefix}:datafield[@tag="024" and @ind1="7"]', ns)
+        for field in doi_fields:
+            subfield_2 = field.find(f'./{prefix}:subfield[@code="2"]', ns)
+            subfield_a = field.find(f'./{prefix}:subfield[@code="a"]', ns)
+            
+            if (subfield_2 is not None and subfield_2.text and 
+                subfield_2.text.strip().lower() == "doi" and
+                subfield_a is not None and subfield_a.text):
+                doi = subfield_a.text.strip()
+                break
     
     # Find subjects (MARC fields 650, 651)
     subjects = []
@@ -1348,48 +1583,45 @@ def parse_marcxml(raw_record, namespaces):
     
     # Find if this is a journal article or book chapter
     # Host item entry is in MARC field 773
-    host_item_fields = record.findall('.//marc:datafield[@tag="773"]', ns)
-    if not host_item_fields:
-        host_item_fields = record.findall('.//mxc:datafield[@tag="773"]', ns)
-    
     journal_title = None
     volume = None
     issue = None
     
-    for field in host_item_fields:
-        # Title of host item (journal or book title)
-        title_subfield = field.find('./marc:subfield[@code="t"]', ns) or field.find('./mxc:subfield[@code="t"]', ns)
-        if title_subfield is not None and title_subfield.text:
-            host_title = title_subfield.text.strip()
-            
-            # Volume
-            volume_subfield = field.find('./marc:subfield[@code="g"]', ns) or field.find('./mxc:subfield[@code="g"]', ns)
-            vol_text = volume_subfield.text.strip() if volume_subfield is not None and volume_subfield.text else None
-            
-            # Try to determine if this is a journal or a book
-            # Journals typically have volume, issue information
-            if vol_text and re.search(r'vol|issue|number|no\.|band', vol_text.lower()):
-                journal_title = host_title
+    for prefix in ['marc', 'mxc']:
+        host_item_fields = record.findall(f'.//{prefix}:datafield[@tag="773"]', ns)
+        for field in host_item_fields:
+            # Title of host item (journal or book title)
+            title_subfield = field.find(f'./{prefix}:subfield[@code="t"]', ns)
+            if title_subfield is not None and title_subfield.text:
+                host_title = title_subfield.text.strip()
                 
-                # Extract volume/issue from text like "vol. 10, no. 3, p. 45-67"
-                vol_match = re.search(r'vol(?:ume)?\.?\s*(\d+)', vol_text, re.IGNORECASE)
-                if vol_match:
-                    volume = vol_match.group(1)
-                
-                issue_match = re.search(r'(?:no|issue|num)\.?\s*(\d+)', vol_text, re.IGNORECASE)
-                if issue_match:
-                    issue = issue_match.group(1)
-                
-                # Extract page range
-                page_match = re.search(r'p(?:age)?s?\.?\s*(\d+)(?:\s*[-–]\s*(\d+))?', vol_text, re.IGNORECASE)
-                if page_match:
-                    if page_match.group(2):  # Range
-                        pages = f"{page_match.group(1)}-{page_match.group(2)}"
-                    else:  # Single page
-                        pages = page_match.group(1)
-            else:
-                # Likely a book chapter - use series field
-                series = host_title
+                # Check for journal by looking for volume info
+                g_subfield = field.find(f'./{prefix}:subfield[@code="g"]', ns)
+                if g_subfield is not None and g_subfield.text:
+                    vol_text = g_subfield.text.strip()
+                    # Check if this looks like a journal reference
+                    if re.search(r'vol|issue|number|no\.|band', vol_text.lower()):
+                        journal_title = host_title
+                        
+                        # Extract volume/issue from text like "vol. 10, no. 3, p. 45-67"
+                        vol_match = re.search(r'vol(?:ume)?\.?\s*(\d+)', vol_text, re.IGNORECASE)
+                        if vol_match:
+                            volume = vol_match.group(1)
+                        
+                        issue_match = re.search(r'(?:no|issue|num)\.?\s*(\d+)', vol_text, re.IGNORECASE)
+                        if issue_match:
+                            issue = issue_match.group(1)
+                        
+                        # Extract page range
+                        page_match = re.search(r'p(?:age)?s?\.?\s*(\d+)(?:\s*[-–]\s*(\d+))?', vol_text, re.IGNORECASE)
+                        if page_match:
+                            if page_match.group(2):  # Range
+                                pages = f"{page_match.group(1)}-{page_match.group(2)}"
+                            else:  # Single page
+                                pages = page_match.group(1)
+                    else:
+                        # Likely a book chapter - use series field
+                        series = host_title
     
     # Determine document type
     document_type = None
@@ -1399,30 +1631,32 @@ def parse_marcxml(raw_record, namespaces):
         document_type = "Book Chapter"
     else:
         # Leader position 6 often indicates material type
-        leader = record.find('./marc:leader', ns)
-        if leader is None:
-            leader = record.find('./mxc:leader', ns)
-        
-        if leader is not None and leader.text:
-            material_type = leader.text[6] if len(leader.text) > 6 else None
-            if material_type == 'a':  # Language material
-                document_type = "Book"
-            elif material_type == 'e':  # Printed music
-                document_type = "Score"
-            elif material_type == 'g':  # Projected medium
-                document_type = "Visual Material"
-            elif material_type == 'i':  # Nonmusical sound recording
-                document_type = "Audio Recording"
-            elif material_type == 'j':  # Musical sound recording
-                document_type = "Music Recording"
-            elif material_type == 'm':  # Computer file
-                document_type = "Electronic Resource"
+        for prefix in ['marc', 'mxc']:
+            leader_elem = record.find(f'.//{prefix}:leader', ns)
+            if leader_elem is not None and leader_elem.text:
+                material_type = leader_elem.text[6] if len(leader_elem.text) > 6 else None
+                if material_type == 'a':  # Language material
+                    document_type = "Book"
+                elif material_type == 'e':  # Printed music
+                    document_type = "Score"
+                elif material_type == 'g':  # Projected medium
+                    document_type = "Visual Material"
+                elif material_type == 'i':  # Nonmusical sound recording
+                    document_type = "Audio Recording"
+                elif material_type == 'j':  # Musical sound recording
+                    document_type = "Music Recording"
+                elif material_type == 'm':  # Computer file
+                    document_type = "Electronic Resource"
+                break
     
     # Create BiblioRecord
     return BiblioRecord(
         id=record_id,
         title=title,
         authors=authors,
+        editors=editors,
+        translators=translators,
+        contributors=contributors,
         year=year,
         publisher_name=publisher,
         place_of_publication=place,
@@ -1443,7 +1677,8 @@ def parse_marcxml(raw_record, namespaces):
         issue=issue,
         pages=pages,
         doi=doi,
-        document_type=document_type
+        document_type=document_type,
+        schema=raw_record.get('schema')
     )
 
 # Register parser for RDF/XML format
@@ -1508,9 +1743,13 @@ def parse_rdfxml(raw_record, namespaces):
             title = f"{title}: {alt_title}"
             logger.debug(f"Added alternative title, full title is now: {title}")
     
-    # Find authors with improved handling to avoid duplicates
+    # Initialize contributor lists
     authors = []
-    seen_authors = set()  # Track seen authors to avoid duplicates
+    editors = []
+    translators = []
+    contributors = []
+    
+    seen_names = set()  # Track seen names to avoid duplicates
     
     # Function to clean author name (remove duplicate entries, trailing commas, etc.)
     def clean_author_name(name):
@@ -1518,67 +1757,160 @@ def parse_rdfxml(raw_record, namespaces):
         name = re.sub(r',\s*$', '', name.strip())
         return name
     
-    # Process P60327 field (contributor statement) with improved parsing
-    # This field often contains multiple authors and role descriptions
-    author_statement = desc.find('./rdau:P60327', ns)
-    if author_statement is not None and author_statement.text:
-        statement_text = author_statement.text.strip()
+    # Helper function to detect and process contributor roles
+    def process_name_with_role(name, seen_names_set):
+        """
+        Process a name string, detect role patterns, clean the name,
+        and return the cleaned name and detected role.
+        
+        Args:
+            name: The raw name string potentially containing role information
+            seen_names_set: Set to track seen names (to avoid duplicates)
+            
+        Returns:
+            tuple: (cleaned_name, role, is_duplicate)
+        """
+        if name is None:
+            return None, None, True
+            
+        name = name.strip()
+        if not name:
+            return None, None, True
+        
+        # Detect editor patterns (German and English)
+        editor_patterns = [
+            r'\([Hh]g\.?\)', r'\([Hh]rsg\.?\)', r'\([Ee]d\.?\)', r'\([Ee]ditor[s]?\)',
+            r'\b[Hh]g\.', r'\b[Hh]rsg\.', r'\b[Ee]d\.', r'\b[Ee]ditor[s]?\b',
+            r'[,\s]+[Hh]g\.', r'[,\s]+[Hh]rsg\.', r'[,\s]+[Ee]d\.', r'[,\s]+[Ee]ditor[s]?'
+        ]
+        
+        # Detect translator patterns (German and English)
+        translator_patterns = [
+            r'\([Üü]bers\.?\)', r'\([Tt]rans\.?\)', r'\([Tt]ranslator[s]?\)',
+            r'\b[Üü]bers\.', r'\b[Tt]rans\.', r'\b[Tt]ranslator[s]?\b',
+            r'[,\s]+[Üü]bers\.', r'[,\s]+[Tt]rans\.', r'[,\s]+[Tt]ranslator[s]?'
+        ]
+        
+        # Check for editor patterns
+        is_editor = any(re.search(pattern, name) for pattern in editor_patterns)
+        
+        # Check for translator patterns
+        is_translator = any(re.search(pattern, name) for pattern in translator_patterns)
+        
+        # Determine role
+        if is_editor:
+            role = "editor"
+        elif is_translator:
+            role = "translator"
+        else:
+            role = "author"
+        
+        # Clean the name by removing role designations
+        if is_editor:
+            # Remove editor designations
+            for pattern in editor_patterns:
+                name = re.sub(pattern, '', name)
+        
+        if is_translator:
+            # Remove translator designations
+            for pattern in translator_patterns:
+                name = re.sub(pattern, '', name)
+        
+        # Clean up remaining punctuation/whitespace
+        name = re.sub(r'\(\s*\)', '', name)  # Empty parentheses
+        name = re.sub(r'\s+', ' ', name)     # Multiple spaces
+        name = re.sub(r'[\s,;:\.]+$', '', name)  # Trailing punctuation/whitespace
+        name = re.sub(r'^[\s,;:\.]+', '', name)  # Leading punctuation/whitespace
+        name = name.strip()
+        
+        if not name:
+            return None, None, True
+        
+        # Check if this is a duplicate
+        is_duplicate = name in seen_names_set
+        if not is_duplicate:
+            seen_names_set.add(name)
+        
+        return name, role, is_duplicate
+    
+    # Process P60327 field (contributor statement)
+    contributor_statement = desc.find('./rdau:P60327', ns)
+    if contributor_statement is not None and contributor_statement.text:
+        statement_text = contributor_statement.text.strip()
         logger.debug(f"Author statement (P60327): {statement_text}")
         
-        # Check for common patterns that indicate editorial roles rather than authorship
+        # First check for specific editorial patterns
         if "herausgegeben von" in statement_text:
-            # Extract the actual authors from the editorial statement
-            # Example: "herausgegeben von Stefan Tobler und Judith Povilus"
+            # Extract editors from the editorial statement
             editor_match = re.search(r'herausgegeben von\s+(.+?)(?:;|$)', statement_text)
             if editor_match:
-                editors = editor_match.group(1).strip()
+                editors_text = editor_match.group(1).strip()
                 # Split by "und" or "and" or commas
-                editor_names = re.split(r'\s+(?:und|and)\s+|,\s*', editors)
-                logger.debug(f"Found editors in statement: {editor_names}")
+                editor_names = re.split(r'\s+(?:und|and)\s+|,\s*', editors_text)
                 for name in editor_names:
-                    if name and name.strip():
-                        clean_name = clean_author_name(name)
-                        if clean_name and clean_name not in seen_authors:
-                            # Add as editor
-                            authors.append(f"{clean_name} (editor)")
-                            seen_authors.add(clean_name)
-                            logger.debug(f"Added editor: {clean_name}")
-        elif "Übers." in statement_text or "Übertragung" in statement_text:
+                    clean_name, role, is_duplicate = process_name_with_role(name, seen_names)
+                    if clean_name and not is_duplicate:
+                        editors.append(clean_name)
+                        logger.debug(f"Added editor from 'herausgegeben von': {clean_name}")
+                
+                # Remove the processed part to avoid duplication
+                statement_text = statement_text.replace(editor_match.group(0), "")
+                
+        # Check for (Hg.) pattern - use a separate regex to catch all variations
+        hg_pattern = re.compile(r'([^,;]+(?:\([Hh]g\.?\))[^,;]*)')
+        editor_matches = hg_pattern.findall(statement_text)
+        
+        for match in editor_matches:
+            clean_name, role, is_duplicate = process_name_with_role(match, seen_names)
+            if clean_name and not is_duplicate and role == "editor":
+                editors.append(clean_name)
+                logger.debug(f"Added editor from (Hg.) pattern: {clean_name}")
+                
+            # Remove this match from the statement
+            statement_text = statement_text.replace(match, '')
+        
+        # Clean up the statement after removing processed parts
+        statement_text = re.sub(r'[,;]\s*[,;]', ',', statement_text)  # Clean up double separators
+        statement_text = statement_text.strip(',; ')
+        
+        # Check for translator patterns
+        if "Übers." in statement_text or "Übertragung" in statement_text or "übersetzt" in statement_text:
             # Extract translators
-            # Example: "Übers. aus dem Ital.: Dietlinde Assmus. Sprecherin: Anja Buczkowski"
-            trans_match = re.search(r'(?:Übers|Übertragung)[^:]+:\s*([^\.]+)', statement_text)
+            trans_match = re.search(r'(?:Übers|Übertragung|übersetzt)[^:]*[:\.]\s*([^\.]+)', statement_text, re.IGNORECASE)
             if trans_match:
-                translator = trans_match.group(1).strip()
-                if translator and translator not in seen_authors:
-                    authors.append(f"{translator} (translator)")
-                    seen_authors.add(translator)
-                    logger.debug(f"Added translator: {translator}")
-                    
-            # Also look for other roles like speaker
-            speaker_match = re.search(r'Sprecherin?:\s*([^\.]+)', statement_text)
-            if speaker_match:
-                speaker = speaker_match.group(1).strip()
-                if speaker and speaker not in seen_authors:
-                    authors.append(f"{speaker} (speaker)")
-                    seen_authors.add(speaker)
-                    logger.debug(f"Added speaker: {speaker}")
-        else:
-            # Normal case - split by standard separators
-            potential_authors = re.split(r',\s*|\s*;\s*|\s+und\s+|\s+and\s+', statement_text)
-            logger.debug(f"Split author statement into: {potential_authors}")
-            for author in potential_authors:
-                clean_name = clean_author_name(author)
-                if clean_name and clean_name not in seen_authors:
-                    authors.append(clean_name)
-                    seen_authors.add(clean_name)
-                    logger.debug(f"Added author: {clean_name}")
+                translator_text = trans_match.group(1).strip()
+                trans_names = re.split(r'\s+(?:und|and)\s+|,\s*', translator_text)
+                for name in trans_names:
+                    clean_name, role, is_duplicate = process_name_with_role(name, seen_names)
+                    if clean_name and not is_duplicate:
+                        translators.append(clean_name)
+                        logger.debug(f"Added translator: {clean_name}")
+                
+                # Remove the processed part
+                statement_text = statement_text.replace(trans_match.group(0), "")
+        
+        # Process any remaining names in the statement as authors
+        if statement_text.strip():
+            # Split by common separators
+            name_parts = re.split(r',\s*|\s*;\s*|\s+und\s+|\s+and\s+', statement_text)
+            for part in name_parts:
+                if part.strip():
+                    clean_name, role, is_duplicate = process_name_with_role(part, seen_names)
+                    if clean_name and not is_duplicate:
+                        if role == "editor":
+                            editors.append(clean_name)
+                            logger.debug(f"Added editor from remaining parts: {clean_name}")
+                        elif role == "translator":
+                            translators.append(clean_name)
+                            logger.debug(f"Added translator from remaining parts: {clean_name}")
+                        else:
+                            authors.append(clean_name)
+                            logger.debug(f"Added author from remaining parts: {clean_name}")
     
     # Extract authors from creator elements
-    creator_count = 0
     for creator_path in ['./dcterms:creator', './dc:creator']:
         creator_elems = desc.findall(creator_path, ns)
         for creator_elem in creator_elems:
-            creator_count += 1
             creator_resource = creator_elem.get('{'+ns['rdf']+'}resource')
             if creator_resource:
                 logger.debug(f"Found creator resource: {creator_resource}")
@@ -1586,115 +1918,140 @@ def parse_rdfxml(raw_record, namespaces):
                 if creator_desc is not None:
                     name_elem = creator_desc.find('./gndo:preferredName', ns)
                     if name_elem is not None and name_elem.text:
-                        author_name = clean_author_name(name_elem.text)
-                        if author_name not in seen_authors:
-                            authors.append(author_name)
-                            seen_authors.add(author_name)
-                            logger.debug(f"Added author from resource: {author_name}")
+                        clean_name, role, is_duplicate = process_name_with_role(name_elem.text, seen_names)
+                        if clean_name and not is_duplicate:
+                            if role == "editor":
+                                editors.append(clean_name)
+                                logger.debug(f"Added editor from resource: {clean_name}")
+                            elif role == "translator":
+                                translators.append(clean_name)
+                                logger.debug(f"Added translator from resource: {clean_name}")
+                            else:
+                                authors.append(clean_name)
+                                logger.debug(f"Added author from resource: {clean_name}")
                 continue
                 
             # If creator contains text directly
             if creator_elem.text and creator_elem.text.strip():
-                author_name = clean_author_name(creator_elem.text)
-                if author_name not in seen_authors:
-                    authors.append(author_name)
-                    seen_authors.add(author_name)
-                    logger.debug(f"Added author from text: {author_name}")
+                clean_name, role, is_duplicate = process_name_with_role(creator_elem.text, seen_names)
+                if clean_name and not is_duplicate:
+                    if role == "editor":
+                        editors.append(clean_name)
+                        logger.debug(f"Added editor from direct text: {clean_name}")
+                    elif role == "translator":
+                        translators.append(clean_name)
+                        logger.debug(f"Added translator from direct text: {clean_name}")
+                    else:
+                        authors.append(clean_name)
+                        logger.debug(f"Added author from direct text: {clean_name}")
                 continue
                 
             # If creator contains nested elements
             nested_nodes = creator_elem.findall('.//*', ns)
             for node in nested_nodes:
                 if 'preferredName' in node.tag and node.text:
-                    author_name = clean_author_name(node.text)
-                    if author_name not in seen_authors:
-                        authors.append(author_name)
-                        seen_authors.add(author_name)
-                        logger.debug(f"Added author from nested element: {author_name}")
+                    clean_name, role, is_duplicate = process_name_with_role(node.text, seen_names)
+                    if clean_name and not is_duplicate:
+                        if role == "editor":
+                            editors.append(clean_name)
+                            logger.debug(f"Added editor from nested element: {clean_name}")
+                        elif role == "translator":
+                            translators.append(clean_name)
+                            logger.debug(f"Added translator from nested element: {clean_name}")
+                        else:
+                            authors.append(clean_name)
+                            logger.debug(f"Added author from nested element: {clean_name}")
                     break
     
-    logger.debug(f"Found {creator_count} creator elements")
+    # Extract authors from marcRole elements - using specific role codes
+    role_mapping = {
+        'aut': 'author',
+        'cre': 'author',
+        'edt': 'editor',
+        'hrg': 'editor',  # German editor role
+        'trl': 'translator',
+        'ths': 'author',  # Thesis advisor typically listed as author
+        'ctb': 'contributor'  # General contributor
+    }
     
-    # Extract authors from marcRole elements
-    marcRole_count = 0
-    author_roles = ['aut', 'cre']
-    for role in author_roles:
-        role_elems = desc.findall(f'./marcRole:{role}', ns)
+    for role_code, role_type in role_mapping.items():
+        role_elems = desc.findall(f'./marcRole:{role_code}', ns)
         for role_elem in role_elems:
-            marcRole_count += 1
+            # Resource reference
             resource = role_elem.get('{'+ns['rdf']+'}resource')
             if resource:
-                logger.debug(f"Found marcRole:{role} resource: {resource}")
-                author_desc = data.find(f'.//rdf:Description[@rdf:about="{resource}"]', ns)
-                if author_desc is not None:
-                    name_elem = author_desc.find('./gndo:preferredName', ns)
+                desc_elem = data.find(f'.//rdf:Description[@rdf:about="{resource}"]', ns)
+                if desc_elem is not None:
+                    name_elem = desc_elem.find('./gndo:preferredName', ns)
                     if name_elem is not None and name_elem.text:
-                        author_name = clean_author_name(name_elem.text)
-                        if author_name not in seen_authors:
-                            authors.append(author_name)
-                            seen_authors.add(author_name)
-                            logger.debug(f"Added author from marcRole:{role}: {author_name}")
+                        clean_name, detected_role, is_duplicate = process_name_with_role(name_elem.text, seen_names)
+                        # Use the role from marcRole if detected_role is "author" (default)
+                        # Otherwise, use the detected role (e.g., if name contains editor pattern)
+                        actual_role = detected_role if detected_role != "author" else role_type
+                        
+                        if clean_name and not is_duplicate:
+                            if actual_role == "editor":
+                                editors.append(clean_name)
+                                logger.debug(f"Added editor from marcRole:{role_code}: {clean_name}")
+                            elif actual_role == "translator":
+                                translators.append(clean_name)
+                                logger.debug(f"Added translator from marcRole:{role_code}: {clean_name}")
+                            elif actual_role == "author":
+                                authors.append(clean_name)
+                                logger.debug(f"Added author from marcRole:{role_code}: {clean_name}")
+                            else:
+                                contributors.append({"name": clean_name, "role": actual_role})
+                                logger.debug(f"Added contributor from marcRole:{role_code}: {clean_name}")
                 continue
-                
-            # Handle nested description elements
+            
+            # Nested description
             for node_desc in role_elem.findall('./rdf:Description', ns):
                 name_elem = node_desc.find('./gndo:preferredName', ns)
                 if name_elem is not None and name_elem.text:
-                    author_name = clean_author_name(name_elem.text)
-                    if author_name not in seen_authors:
-                        authors.append(author_name)
-                        seen_authors.add(author_name)
-                        logger.debug(f"Added author from nested marcRole:{role}: {author_name}")
-                        
-            # Handle node ID references
+                    clean_name, detected_role, is_duplicate = process_name_with_role(name_elem.text, seen_names)
+                    actual_role = detected_role if detected_role != "author" else role_type
+                    
+                    if clean_name and not is_duplicate:
+                        if actual_role == "editor":
+                            editors.append(clean_name)
+                            logger.debug(f"Added editor from nested marcRole:{role_code}: {clean_name}")
+                        elif actual_role == "translator":
+                            translators.append(clean_name)
+                            logger.debug(f"Added translator from nested marcRole:{role_code}: {clean_name}")
+                        elif actual_role == "author":
+                            authors.append(clean_name)
+                            logger.debug(f"Added author from nested marcRole:{role_code}: {clean_name}")
+                        else:
+                            contributors.append({"name": clean_name, "role": actual_role})
+                            logger.debug(f"Added contributor from nested marcRole:{role_code}: {clean_name}")
+            
+            # NodeID reference
             node_id = role_elem.get('{'+ns['rdf']+'}nodeID')
             if node_id:
-                logger.debug(f"Found marcRole:{role} nodeID: {node_id}")
                 node_desc = data.find(f'.//rdf:Description[@rdf:nodeID="{node_id}"]', ns)
                 if node_desc is not None:
                     name_elem = node_desc.find('./gndo:preferredName', ns)
                     if name_elem is not None and name_elem.text:
-                        author_name = clean_author_name(name_elem.text)
-                        if author_name not in seen_authors:
-                            authors.append(author_name)
-                            seen_authors.add(author_name)
-                            logger.debug(f"Added author from marcRole:{role} nodeID: {author_name}")
+                        clean_name, detected_role, is_duplicate = process_name_with_role(name_elem.text, seen_names)
+                        actual_role = detected_role if detected_role != "author" else role_type
+                        
+                        if clean_name and not is_duplicate:
+                            if actual_role == "editor":
+                                editors.append(clean_name)
+                                logger.debug(f"Added editor from marcRole:{role_code} nodeID: {clean_name}")
+                            elif actual_role == "translator":
+                                translators.append(clean_name)
+                                logger.debug(f"Added translator from marcRole:{role_code} nodeID: {clean_name}")
+                            elif actual_role == "author":
+                                authors.append(clean_name)
+                                logger.debug(f"Added author from marcRole:{role_code} nodeID: {clean_name}")
+                            else:
+                                contributors.append({"name": clean_name, "role": actual_role})
+                                logger.debug(f"Added contributor from marcRole:{role_code} nodeID: {clean_name}")
     
-    logger.debug(f"Found {marcRole_count} marcRole elements for authors")
-    
-    # Editor roles
-    editor_count = 0
-    editor_roles = ['edt']
-    for role in editor_roles:
-        role_elems = desc.findall(f'./marcRole:{role}', ns)
-        for role_elem in role_elems:
-            editor_count += 1
-            resource = role_elem.get('{'+ns['rdf']+'}resource')
-            if resource:
-                logger.debug(f"Found marcRole:{role} resource: {resource}")
-                editor_desc = data.find(f'.//rdf:Description[@rdf:about="{resource}"]', ns)
-                if editor_desc is not None:
-                    name_elem = editor_desc.find('./gndo:preferredName', ns)
-                    if name_elem is not None and name_elem.text:
-                        editor_name = clean_author_name(name_elem.text) + " (editor)"
-                        if editor_name not in seen_authors:
-                            authors.append(editor_name)
-                            seen_authors.add(editor_name)
-                            logger.debug(f"Added editor from marcRole:{role}: {editor_name}")
-                continue
-                
-            # Handle nested elements
-            for node_desc in role_elem.findall('./rdf:Description', ns):
-                name_elem = node_desc.find('./gndo:preferredName', ns)
-                if name_elem is not None and name_elem.text:
-                    editor_name = clean_author_name(name_elem.text) + " (editor)"
-                    if editor_name not in seen_authors:
-                        authors.append(editor_name)
-                        seen_authors.add(editor_name)
-                        logger.debug(f"Added editor from nested marcRole:{role}: {editor_name}")
-    
-    logger.debug(f"Found {editor_count} marcRole elements for editors")
     logger.debug(f"Final author list: {authors}")
+    logger.debug(f"Final editor list: {editors}")
+    logger.debug(f"Final translator list: {translators}")
     
     # Find year
     year = None
@@ -1951,6 +2308,7 @@ def parse_rdfxml(raw_record, namespaces):
     logger.debug(f"Record summary for {record_id}:")
     logger.debug(f"  Title: {title}")
     logger.debug(f"  Author count: {len(authors)}")
+    logger.debug(f"  Editor count: {len(editors)}")
     logger.debug(f"  Year: {year}")
     logger.debug(f"  Publisher: {publisher_name}")
     logger.debug(f"  Type: {document_type}")
@@ -1960,6 +2318,9 @@ def parse_rdfxml(raw_record, namespaces):
         id=record_id,
         title=title,
         authors=authors,
+        editors=editors,
+        translators=translators,
+        contributors=contributors,
         year=year,
         publisher_name=publisher_name,
         place_of_publication=place_of_publication,
@@ -1973,15 +2334,200 @@ def parse_rdfxml(raw_record, namespaces):
         series=series,
         extent=extent,
         edition=edition,
-        
-        # Journal article fields
         journal_title=journal_title,
         volume=volume,
         issue=issue,
         pages=pages,
         doi=doi,
-        document_type=document_type
+        document_type=document_type,
+        raw_data=raw_record['raw_xml'],
+        schema=raw_record.get('schema')
     )
+
+# Add function to generate BibTeX from BiblioRecord
+def bibtex_from_record(record: BiblioRecord) -> str:
+    """
+    Convert a BiblioRecord to BibTeX format.
+    
+    Args:
+        record: BiblioRecord object
+        
+    Returns:
+        BibTeX formatted string
+    """
+    # Get citation key from record
+    citation_key = record.get_citation_key()
+    
+    # Determine entry type
+    if record.document_type:
+        doc_type_lower = record.document_type.lower()
+        if "article" in doc_type_lower:
+            entry_type = "article"
+        elif "chapter" in doc_type_lower:
+            entry_type = "incollection"
+        elif "thesis" in doc_type_lower:
+            entry_type = "phdthesis"
+        elif "proceedings" in doc_type_lower:
+            entry_type = "inproceedings"
+        elif "report" in doc_type_lower:
+            entry_type = "techreport"
+        else:
+            entry_type = "book"
+    else:
+        # Default to book if no document type specified
+        entry_type = "book"
+    
+    # Start building BibTeX
+    bibtex = [f"@{entry_type}{{{citation_key},"]
+    
+    # Title (required)
+    title = record.title.replace("{", "\\{").replace("}", "\\}")
+    bibtex.append(f"  title = {{{title}}},")
+    
+    # Authors
+    if record.authors:
+        # Format authors properly for BibTeX
+        authors_list = " and ".join(record.authors)
+        bibtex.append(f"  author = {{{authors_list}}},")
+    
+    # Editors
+    if record.editors:
+        # Format editors properly for BibTeX
+        editors_list = " and ".join(record.editors)
+        bibtex.append(f"  editor = {{{editors_list}}},")
+    
+    # Year
+    if record.year:
+        bibtex.append(f"  year = {{{record.year}}},")
+    
+    # Journal for articles
+    if entry_type == "article" and record.journal_title:
+        bibtex.append(f"  journal = {{{record.journal_title}}},")
+        
+        # Volume
+        if record.volume:
+            bibtex.append(f"  volume = {{{record.volume}}},")
+            
+        # Issue/Number
+        if record.issue:
+            bibtex.append(f"  number = {{{record.issue}}},")
+    
+    # Publisher
+    if record.publisher_name:
+        bibtex.append(f"  publisher = {{{record.publisher_name}}},")
+    
+    # Address (place of publication)
+    if record.place_of_publication:
+        bibtex.append(f"  address = {{{record.place_of_publication}}},")
+    
+    # Series
+    if record.series:
+        bibtex.append(f"  series = {{{record.series}}},")
+    
+    # ISBN
+    if record.isbn:
+        bibtex.append(f"  isbn = {{{record.isbn}}},")
+    
+    # ISSN for journals
+    if entry_type == "article" and record.issn:
+        bibtex.append(f"  issn = {{{record.issn}}},")
+    
+    # DOI
+    if record.doi:
+        bibtex.append(f"  doi = {{{record.doi}}},")
+    
+    # Pages
+    if record.pages:
+        bibtex.append(f"  pages = {{{record.pages}}},")
+    
+    # Edition
+    if record.edition:
+        bibtex.append(f"  edition = {{{record.edition}}},")
+    
+    # URL (use the first one if multiple are available)
+    if record.urls:
+        bibtex.append(f"  url = {{{record.urls[0]}}},")
+    
+    # Language
+    if record.language:
+        bibtex.append(f"  language = {{{record.language}}},")
+    
+    # Put record ID in note field for reference
+    bibtex.append(f"  note = {{ID: {record.id}}}")
+    
+    # Close the entry
+    bibtex.append("}")
+    
+    return "\n".join(bibtex)
+
+# Function to convert a list of BiblioRecords to BibTeX format
+def bibtex_from_records(records: List[BiblioRecord]) -> str:
+    """
+    Convert a list of BiblioRecords to BibTeX format with proper handling
+    for duplicate keys.
+    
+    Args:
+        records: List of BiblioRecord objects
+        
+    Returns:
+        BibTeX formatted string with all records
+    """
+    results = []
+    used_keys = set()
+    
+    for i, record in enumerate(records):
+        # Get base citation key and ensure uniqueness
+        base_key = record.get_citation_key()
+        citation_key = base_key
+        
+        # If key already exists, add a suffix
+        if citation_key in used_keys:
+            j = 1
+            while f"{citation_key}{j}" in used_keys:
+                j += 1
+            citation_key = f"{citation_key}{j}"
+        
+        used_keys.add(citation_key)
+        
+        # Create a copy of the record with the new key
+        record_copy = BiblioRecord(
+            id=citation_key,
+            title=record.title,
+            authors=record.authors.copy(),
+            editors=record.editors.copy(),
+            translators=record.translators.copy() if record.translators else [],
+            contributors=record.contributors.copy() if record.contributors else [],
+            year=record.year,
+            publisher_name=record.publisher_name,
+            place_of_publication=record.place_of_publication,
+            isbn=record.isbn,
+            issn=record.issn,
+            urls=record.urls.copy() if record.urls else [],
+            abstract=record.abstract,
+            language=record.language,
+            format=record.format,
+            subjects=record.subjects.copy() if record.subjects else [],
+            series=record.series,
+            extent=record.extent,
+            edition=record.edition,
+            journal_title=record.journal_title,
+            volume=record.volume,
+            issue=record.issue,
+            pages=record.pages,
+            doi=record.doi,
+            document_type=record.document_type,
+            raw_data=record.raw_data,
+            schema=record.schema
+        )
+        
+        # Add BibTeX for this record
+        results.append(bibtex_from_record(record_copy))
+        
+        # Add a separator between records
+        if i < len(records) - 1:
+            results.append("")
+    
+    return "\n".join(results)
 
 # List of commonly used SRU endpoints
 SRU_ENDPOINTS = {

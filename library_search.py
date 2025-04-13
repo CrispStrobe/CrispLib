@@ -422,161 +422,9 @@ def format_record_bibtex(record):
     Returns:
         BibTeX formatted string
     """
-    # Determine entry type based on record format/type
-    entry_type = "book"  # default
-    
-    # For journal articles
-    if record.format == "Journal Article" or record.journal_title:
-        entry_type = "article"
-    # For book chapters
-    elif record.format == "Book Chapter" or record.format == "CHAP":
-        entry_type = "incollection"
-    # For conference papers
-    elif record.format == "Conference Paper":
-        entry_type = "inproceedings"
-    # For theses
-    elif record.format and ("thesis" in record.format.lower() or "dissertation" in record.format.lower()):
-        entry_type = "phdthesis"
-    
-    # Create citation key from first author and year
-    first_author = record.authors[0] if record.authors else "unknown"
-    year = record.year or "nd"
-    
-    # Extract last name for the key
-    if ',' in first_author:
-        last_name = first_author.split(',')[0].strip().lower()
-        # Remove spaces and non-ascii characters
-        last_name = re.sub(r'\W+', '', last_name)
-    else:
-        parts = first_author.split()
-        last_name = parts[-1].lower() if parts else "unknown"
-        # Remove spaces and non-ascii characters
-        last_name = re.sub(r'\W+', '', last_name)
-    
-    # Create citation key
-    citation_key = f"{last_name}{year}"
-    
-    # Start building BibTeX entry
-    bibtex = [f"@{entry_type}{{{citation_key},"]
-    
-    # Add required fields
-    if record.title:
-        # Escape special characters in title
-        title = record.title.replace("&", "\\&").replace("%", "\\%")
-        bibtex.append(f"  title = {{{title}}},")
-    
-    # Format authors
-    if record.authors:
-        # Format as "lastname, firstname and lastname, firstname"
-        formatted_authors = []
-        for author in record.authors:
-            # Check if already in "lastname, firstname" format
-            if ',' in author:
-                formatted_authors.append(author)
-            else:
-                # Assume "firstname lastname" format and convert
-                parts = author.split()
-                if len(parts) > 1:
-                    last_name = parts[-1]
-                    first_names = ' '.join(parts[:-1])
-                    formatted_authors.append(f"{last_name}, {first_names}")
-                else:
-                    formatted_authors.append(author)
-        
-        bibtex.append(f"  author = {{{' and '.join(formatted_authors)}}},")
-    
-    # Add year
-    if record.year:
-        bibtex.append(f"  year = {{{record.year}}},")
-    
-    # Journal-specific fields (for articles)
-    if entry_type == "article":
-        if record.journal_title:
-            bibtex.append(f"  journal = {{{record.journal_title}}},")
-        
-        if record.volume:
-            bibtex.append(f"  volume = {{{record.volume}}},")
-        
-        if record.issue:
-            bibtex.append(f"  number = {{{record.issue}}},")
-        
-        # Extract pages from extent field if available
-        pages = None
-        if record.extent and "Pages" in record.extent:
-            page_match = re.search(r'Pages\s+(\d+(?:-\d+)?)', record.extent)
-            if page_match:
-                pages = page_match.group(1).replace('-', '--')  # BibTeX uses -- for ranges
-        
-        if pages:
-            bibtex.append(f"  pages = {{{pages}}},")
-    
-    # Book chapter specific fields
-    elif entry_type == "incollection":
-        # Add book title (from series)
-        if record.series:
-            bibtex.append(f"  booktitle = {{{record.series}}},")
-        
-        # Add editor if available
-        series_editor = None
-        if isinstance(record.raw_data, dict) and 'series_editor' in record.raw_data:
-            series_editor = record.raw_data['series_editor']
-        
-        if series_editor:
-            bibtex.append(f"  editor = {{{series_editor}}},")
-        
-        # Add publisher
-        if record.publisher_name:
-            bibtex.append(f"  publisher = {{{record.publisher_name}}},")
-        
-        # Add address (place of publication)
-        if record.place_of_publication:
-            bibtex.append(f"  address = {{{record.place_of_publication}}},")
-        
-        # Extract pages from extent field
-        pages = None
-        if record.extent and "Pages" in record.extent:
-            page_match = re.search(r'Pages\s+(\d+(?:-\d+)?)', record.extent)
-            if page_match:
-                pages = page_match.group(1).replace('-', '--')  # BibTeX uses -- for ranges
-        
-        if pages:
-            bibtex.append(f"  pages = {{{pages}}},")
-    else:
-        # Add publisher for other types
-        if record.publisher_name:
-            bibtex.append(f"  publisher = {{{record.publisher_name}}},")
-        
-        # Add address (place of publication)
-        if record.place_of_publication:
-            bibtex.append(f"  address = {{{record.place_of_publication}}},")
-        
-        # Add series for books
-        if record.series:
-            bibtex.append(f"  series = {{{record.series}}},")
-    
-    # Add ISBN
-    if record.isbn:
-        bibtex.append(f"  isbn = {{{record.isbn}}},")
-    
-    # Add ISSN for journals
-    if record.issn:
-        bibtex.append(f"  issn = {{{record.issn}}},")
-    
-    # Add edition
-    if record.edition:
-        bibtex.append(f"  edition = {{{record.edition}}},")
-    
-    # Add language if available
-    if record.language:
-        bibtex.append(f"  language = {{{record.language}}},")
-    
-    # Add note with record ID
-    bibtex.append(f"  note = {{ID: {record.id}}}")
-    
-    # Close the entry
-    bibtex.append("}")
-    
-    return "\n".join(bibtex)
+    # Use the new bibtex_from_record function from sru_library
+    from sru_library import bibtex_from_record
+    return bibtex_from_record(record)
 
 
 def format_record_ris(record):
@@ -620,6 +468,21 @@ def format_record_ris(record):
                 ris.append(f"AU  - {last_name}, {first_names}")
             else:
                 ris.append(f"AU  - {author}")
+
+    # Add editors if present
+    for editor in record.editors:
+        # For RIS, typically format is "lastname, firstname"
+        if ',' in editor:
+            ris.append(f"ED  - {editor}")
+        else:
+            # Convert "firstname lastname" to "lastname, firstname"
+            parts = editor.split()
+            if len(parts) > 1:
+                last_name = parts[-1]
+                first_names = ' '.join(parts[:-1])
+                ris.append(f"ED  - {last_name}, {first_names}")
+            else:
+                ris.append(f"ED  - {editor}")
     
     # Add year
     if record.year:
@@ -750,6 +613,32 @@ def format_record(record, format_type='text', include_raw=False, verbose=False):
                         "firstName": ""
                     }
             zotero_data["creators"].append(creator)
+
+        # Format editors for Zotero
+        for editor in record.editors:
+            creator = {}
+            if ',' in editor:
+                parts = editor.split(',', 1)
+                creator = {
+                    "creatorType": "editor",
+                    "lastName": parts[0].strip(),
+                    "firstName": parts[1].strip() if len(parts) > 1 else ""
+                }
+            else:
+                parts = editor.split()
+                if len(parts) > 1:
+                    creator = {
+                        "creatorType": "editor",
+                        "lastName": parts[-1],
+                        "firstName": ' '.join(parts[:-1])
+                    }
+                else:
+                    creator = {
+                        "creatorType": "editor",
+                        "lastName": editor,
+                        "firstName": ""
+                    }
+            zotero_data["creators"].append(creator)
         
         return json.dumps(zotero_data, indent=2)
     
@@ -760,6 +649,10 @@ def format_record(record, format_type='text', include_raw=False, verbose=False):
     if record.authors:
         # Properly format authors list
         result.append(f"Author(s): {', '.join(record.authors)}")
+
+    if record.editors:
+        # Properly format editors list
+        result.append(f"Editor(s): {', '.join(record.editors)}")
     
     if record.year:
         result.append(f"Year: {record.year}")
@@ -1513,6 +1406,32 @@ def save_results_to_file(records, filename, format_type='text', include_raw=Fals
                                 creator = {
                                     "creatorType": "author",
                                     "lastName": author,
+                                    "firstName": ""
+                                }
+                        creators.append(creator)
+
+                    # Add editors
+                    for editor in record.editors:
+                        creator = {}
+                        if ',' in editor:
+                            parts = editor.split(',', 1)
+                            creator = {
+                                "creatorType": "editor",
+                                "lastName": parts[0].strip(),
+                                "firstName": parts[1].strip() if len(parts) > 1 else ""
+                            }
+                        else:
+                            parts = editor.split()
+                            if len(parts) > 1:
+                                creator = {
+                                    "creatorType": "editor",
+                                    "lastName": parts[-1],
+                                    "firstName": ' '.join(parts[:-1])
+                                }
+                            else:
+                                creator = {
+                                    "creatorType": "editor",
+                                    "lastName": editor,
                                     "firstName": ""
                                 }
                         creators.append(creator)
