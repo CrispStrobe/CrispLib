@@ -628,6 +628,7 @@ class IxTheoClient:
         entry_type = "misc"  # Default
         title = None
         authors = []
+        editors = []  
         year = None
         publisher = None
         place = None
@@ -688,6 +689,10 @@ class IxTheoClient:
             elif tag == "AU":
                 authors.append(value)
                 self._debug_print(f"Added author: {value}")
+
+            elif tag == "ED":
+                editors.append(value)
+                self._debug_print(f"Added editor: {value}")
                 
             elif tag == "PY" or tag == "Y1":
                 # Extract year
@@ -774,6 +779,15 @@ class IxTheoClient:
         else:
             citation_key = f"ixtheo_{record_id}"
             self._debug_print(f"No author/year, using ID-based citation key: {citation_key}")
+
+        if editors:
+            # Format editors for BibTeX
+            formatted_editors = []
+            for editor in editors:
+                # Ensure proper formatting (already in "lastname, firstname" in RIS)
+                formatted_editors.append(editor)
+            
+            bibtex.append(f"  editor = {{{' and '.join(formatted_editors)}}},")
         
         # Build BibTeX entry
         bibtex = [f"@{entry_type}{{{citation_key},"]
@@ -966,6 +980,7 @@ class IxTheoSearchHandler:
             doi = None
             series_title = None
             series_editor = None
+            editors = []
             
             # Simple RIS parser
             for line in ris_data.splitlines():
@@ -1016,20 +1031,23 @@ class IxTheoSearchHandler:
                         series_title = value
                         logger.debug(f"Series/Book title set to: {value}")
                         
-                        # Try to extract editor information from the series title
-                        editor_match = re.search(r'(.+?),\s+(.+?)(?:\s+\d{4}-)?\s+\(edt\)', value)
-                        if editor_match:
-                            # Extract editor name and clean up
-                            series_editor = editor_match.groups()[0] + ', ' + editor_match.groups()[1]
-                            # Remove birth dates
-                            series_editor = re.sub(r'\s+\d{4}-(?:\d{4})?', '', series_editor)
-                            logger.debug(f"Extracted series editor: {series_editor}")
-                            
-                            # Extract just the book title
-                            book_title_match = re.search(r'\(edt\),\s+(.+)', value)
-                            if book_title_match:
-                                series_title = book_title_match.groups()[0].strip()
-                                logger.debug(f"Cleaned series title: {series_title}")
+                        # If we found editors in ED tags, use those, otherwise try to extract from series title
+                        if not editors and series_title:
+                            # Try to extract editor information from the series title
+                            editor_match = re.search(r'(.+?),\s+(.+?)(?:\s+\d{4}-)?\s+\(edt\)', series_title)
+                            if editor_match:
+                                # Extract editor name and clean up
+                                series_editor = editor_match.groups()[0] + ', ' + editor_match.groups()[1]
+                                # Remove birth dates
+                                series_editor = re.sub(r'\s+\d{4}-(?:\d{4})?', '', series_editor)
+                                editors.append(series_editor)
+                                logger.debug(f"Extracted series editor: {series_editor}")
+                                
+                                # Extract just the book title
+                                book_title_match = re.search(r'\(edt\),\s+(.+)', series_title)
+                                if book_title_match:
+                                    series_title = book_title_match.groups()[0].strip()
+                                    logger.debug(f"Cleaned series title: {series_title}")
                 elif tag == "JO":  # Journal
                     journal = value
                     logger.debug(f"Journal title set to: {value}")
@@ -1051,6 +1069,10 @@ class IxTheoSearchHandler:
                 elif tag == "DO":  # DOI
                     doi = value
                     logger.debug(f"DOI set to: {doi}")
+                elif tag == "ED":  # Editor
+                    editors.append(value)
+                    logger.debug(f"Added editor: {value}")
+
             
             # Create page range if we have both start and end pages
             pages = None
@@ -1075,6 +1097,8 @@ class IxTheoSearchHandler:
                 id=record.id,
                 title=title or (detailed_record.title if detailed_record else record.title) or "Unknown Title",
                 authors=authors or (detailed_record.authors if detailed_record else record.authors) or [],
+                # editors=[series_editor] if series_editor else [],  # Add editors field
+                # editors=editors or (detailed_record.editors if detailed_record else []),
                 year=year or (detailed_record.year if detailed_record else record.year),
                 publisher_name=publisher or (detailed_record.publisher_name if detailed_record else None),
                 place_of_publication=place or (detailed_record.place_of_publication if detailed_record else None),
@@ -1086,14 +1110,11 @@ class IxTheoSearchHandler:
                 volume=volume,
                 issue=issue,
                 
-                # For book chapters, store book title in series field with editor info
+                # For book chapters, store book title in series field
                 series=series_title,
                 
-                # Store editor info in raw_data
-                raw_data={
-                    "ris_data": ris_data,
-                    "series_editor": series_editor
-                } if series_editor else ris_data,
+                # Store in raw_data only if we don't have a dedicated editors field
+                raw_data=ris_data,
                 
                 # Store page range in extent for consistency
                 extent=f"Pages {pages}" if pages else None,
@@ -1112,6 +1133,7 @@ class IxTheoSearchHandler:
             logger.debug(f"Enhanced record details for {record.id}:")
             logger.debug(f"  Title: {enhanced_record.title}")
             logger.debug(f"  Authors: {enhanced_record.authors}")
+            logger.debug(f"  Editors: {enhanced_record.editors}")
             logger.debug(f"  Year: {enhanced_record.year}")
             logger.debug(f"  Format/Type: {enhanced_record.format}")
             logger.debug(f"  Publisher: {enhanced_record.publisher_name}")

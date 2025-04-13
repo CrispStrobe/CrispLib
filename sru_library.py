@@ -129,6 +129,55 @@ class BiblioRecord:
         if self.authors:
             # Extract last name (after the last comma or the whole name if no comma)
             first_author = self.authors[0]
+            
+            # Clean the name first - remove any role indicators
+            first_author = re.sub(r'\s*\[[^\]]*\]', '', first_author)
+            # Fix broken brackets
+            first_author = re.sub(r'\]\s*$', '', first_author)
+            first_author = re.sub(r'^\s*\[', '', first_author)
+            
+            if ',' in first_author:
+                author_key = first_author.split(',')[0].strip().lower()
+            else:
+                # Take the last word as the last name
+                parts = first_author.split()
+                author_key = parts[-1].lower() if parts else 'unknown'
+        elif self.editors:
+            # Use first editor if no authors
+            first_editor = self.editors[0]
+            
+            # Clean the name first
+            first_editor = re.sub(r'\s*\[[^\]]*\]', '', first_editor)
+            # Fix broken brackets
+            first_editor = re.sub(r'\]\s*$', '', first_editor)
+            first_editor = re.sub(r'^\s*\[', '', first_editor)
+            
+            if ',' in first_editor:
+                author_key = first_editor.split(',')[0].strip().lower()
+            else:
+                parts = first_editor.split()
+                author_key = parts[-1].lower() if parts else 'editor'
+        else:
+            author_key = 'unknown'
+        
+        # Remove any non-alphanumeric characters
+        author_key = re.sub(r'[^a-z0-9]', '', author_key)
+        
+        # If author_key is empty after cleaning, use 'unknown'
+        if not author_key:
+            author_key = 'unknown'
+        
+        # Add year if available
+        if self.year:
+            return f"{author_key}{self.year}"
+        return author_key
+    
+    def get_citation_key_old(self) -> str:
+        """Generate a sensible BibTeX citation key."""
+        # Get first author's last name or 'unknown' if no authors
+        if self.authors:
+            # Extract last name (after the last comma or the whole name if no comma)
+            first_author = self.authors[0]
             if ',' in first_author:
                 author_key = first_author.split(',')[0].strip().lower()
             else:
@@ -2380,21 +2429,75 @@ def bibtex_from_record(record: BiblioRecord) -> str:
     # Start building BibTeX
     bibtex = [f"@{entry_type}{{{citation_key},"]
     
-    # Title (required)
-    title = record.title.replace("{", "\\{").replace("}", "\\}")
+    # Clean up the title
+    # Remove trailing author information after '/'
+    title = re.sub(r'\s*/\s*[^/]+$', '', record.title)
+    # Escape special characters
+    title = title.replace("{", "\\{").replace("}", "\\}")
     bibtex.append(f"  title = {{{title}}},")
     
-    # Authors
+    # Clean and add authors if available
     if record.authors:
-        # Format authors properly for BibTeX
-        authors_list = " and ".join(record.authors)
-        bibtex.append(f"  author = {{{authors_list}}},")
+        # Clean up author names
+        cleaned_authors = []
+        for author in record.authors:
+            # Remove role indicators
+            clean_author = re.sub(r'\s*\[[^\]]*\]', '', author)
+            # Remove trailing commas and whitespace
+            clean_author = re.sub(r',\s*$', '', clean_author.strip())
+            # Fix any broken bracket pairs
+            clean_author = re.sub(r'\]\s*$', '', clean_author)
+            clean_author = re.sub(r'^\s*\[', '', clean_author)
+            
+            if clean_author:
+                cleaned_authors.append(clean_author)
+        
+        if cleaned_authors:
+            # Format authors properly for BibTeX
+            authors_list = " and ".join(cleaned_authors)
+            bibtex.append(f"  author = {{{authors_list}}},")
     
-    # Editors
+    # Add editors if available
     if record.editors:
-        # Format editors properly for BibTeX
-        editors_list = " and ".join(record.editors)
-        bibtex.append(f"  editor = {{{editors_list}}},")
+        # Clean up editor names
+        cleaned_editors = []
+        for editor in record.editors:
+            # Remove role indicators
+            clean_editor = re.sub(r'\s*\[[^\]]*\]', '', editor)
+            # Remove trailing commas and whitespace
+            clean_editor = re.sub(r',\s*$', '', clean_editor.strip())
+            # Fix any broken bracket pairs
+            clean_editor = re.sub(r'\]\s*$', '', clean_editor)
+            clean_editor = re.sub(r'^\s*\[', '', clean_editor)
+            
+            if clean_editor:
+                cleaned_editors.append(clean_editor)
+        
+        if cleaned_editors:
+            # Format editors properly for BibTeX
+            editors_list = " and ".join(cleaned_editors)
+            bibtex.append(f"  editor = {{{editors_list}}},")
+    
+    # Add translators if available
+    if record.translators:
+        # Clean up translator names
+        cleaned_translators = []
+        for translator in record.translators:
+            # Remove role indicators
+            clean_translator = re.sub(r'\s*\[[^\]]*\]', '', translator)
+            # Remove trailing commas and whitespace
+            clean_translator = re.sub(r',\s*$', '', clean_translator.strip())
+            # Fix any broken bracket pairs
+            clean_translator = re.sub(r'\]\s*$', '', clean_translator)
+            clean_translator = re.sub(r'^\s*\[', '', clean_translator)
+            
+            if clean_translator:
+                cleaned_translators.append(clean_translator)
+        
+        if cleaned_translators:
+            # Add translators in note field (BibTeX doesn't have a translator field)
+            translators_list = " and ".join(cleaned_translators)
+            bibtex.append(f"  translator = {{{translators_list}}},")
     
     # Year
     if record.year:
@@ -2478,6 +2581,13 @@ def bibtex_from_records(records: List[BiblioRecord]) -> str:
     for i, record in enumerate(records):
         # Get base citation key and ensure uniqueness
         base_key = record.get_citation_key()
+        # Clean up citation key to avoid problematic characters
+        base_key = re.sub(r'[^a-zA-Z0-9]', '', base_key)
+        
+        # If key is empty (e.g., no author), use "unknown"
+        if not base_key:
+            base_key = "unknown"
+            
         citation_key = base_key
         
         # If key already exists, add a suffix
@@ -2493,8 +2603,8 @@ def bibtex_from_records(records: List[BiblioRecord]) -> str:
         record_copy = BiblioRecord(
             id=citation_key,
             title=record.title,
-            authors=record.authors.copy(),
-            editors=record.editors.copy(),
+            authors=record.authors.copy() if record.authors else [],
+            editors=record.editors.copy() if record.editors else [],
             translators=record.translators.copy() if record.translators else [],
             contributors=record.contributors.copy() if record.contributors else [],
             year=record.year,
