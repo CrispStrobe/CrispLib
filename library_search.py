@@ -20,6 +20,8 @@ import urllib.parse
 from datetime import datetime
 from typing import Dict, List, Any, Optional, Tuple
 import unicodedata
+import shutil
+import tempfile
 
 # Import library modules
 from sru_library import SRUClient, BiblioRecord, SRU_ENDPOINTS
@@ -35,9 +37,14 @@ except ImportError:
     ZOTERO_API_AVAILABLE = False
 
 # Configure logging
+# logging.basicConfig(
+#    level=logging.INFO,
+#    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+#)
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    stream=sys.stderr
 )
 logger = logging.getLogger("library_search")
 
@@ -640,6 +647,13 @@ def format_record(record, format_type='text', include_raw=False, verbose=False):
                     }
             zotero_data["creators"].append(creator)
         
+        # Add journal article specific fields
+        if record.journal_title:
+            zotero_data["publicationTitle"] = record.journal_title
+            zotero_data["volume"] = record.volume
+            zotero_data["issue"] = record.issue
+            zotero_data["pages"] = record.pages
+        
         return json.dumps(zotero_data, indent=2)
     
     # Default to text format with improved layout
@@ -672,6 +686,16 @@ def format_record(record, format_type='text', include_raw=False, verbose=False):
     
     if record.extent:
         result.append(f"Extent: {record.extent}")
+    
+    # Add journal information for articles
+    if record.journal_title:
+        result.append(f"Journal Title: {record.journal_title}")
+        if record.volume:
+            result.append(f"Volume: {record.volume}")
+        if record.issue:
+            result.append(f"Issue: {record.issue}")
+        if record.pages:
+            result.append(f"Pages: {record.pages}")
     
     if record.isbn:
         result.append(f"ISBN: {record.isbn}")
@@ -706,6 +730,10 @@ def format_record(record, format_type='text', include_raw=False, verbose=False):
             abstract = abstract[:297] + "..."
         result.append(f"Abstract: {abstract}")
     
+    # Show format information if available
+    if record.format:
+        result.append(f"Format: {record.format}")
+    
     # Show raw data in verbose mode
     if include_raw or verbose:
         result.append("\nRaw Data:")
@@ -717,6 +745,84 @@ def format_record(record, format_type='text', include_raw=False, verbose=False):
     
     return "\n".join(result)
 
+def handle_search_output(records, args):
+    """
+    Handle all types of output for search results (display, file export, Zotero import, HTML generation).
+    
+    Args:
+        records: List of BiblioRecord objects
+        args: Command line arguments
+        
+    Returns:
+        Boolean indicating success
+    """
+    if not records:
+        return False
+        
+    success = True
+    
+    # Handle output to file if specified
+    if args.output:
+        file_success = save_results_to_file(records, args.output, args.format, args.raw, args.verbose)
+        if not file_success:
+            logger.error(f"Failed to save results to {args.output}")
+            success = False
+    
+    # Import to Zotero if requested
+    if args.import_to_zotero:
+        if args.zotero_path or (args.zotero_api_key and args.zotero_library_id):
+            logger.info(f"Importing {len(records)} records to Zotero...")
+            
+            # Add any requested tags to all records
+            if args.zotero_tags:
+                for record in records:
+                    record.subjects.extend(args.zotero_tags)
+            
+            # Add notes if requested
+            if args.zotero_notes:
+                for record in records:
+                    if not hasattr(record, 'notes'):
+                        record.notes = []
+                    record.notes.append(args.zotero_notes)
+            
+            # Import to Zotero
+            success_count, error_count = import_to_zotero(
+                records=records,
+                zotero_path=args.zotero_path,
+                zotero_api_key=args.zotero_api_key,
+                zotero_library_id=args.zotero_library_id,
+                zotero_library_type=args.zotero_library_type,
+                collection_key=args.zotero_collection,
+                check_duplicates=args.check_duplicates
+            )
+            
+            logger.info(f"Zotero import complete: {success_count} successes, {error_count} errors")
+            if success_count == 0:
+                logger.warning("No records were successfully imported to Zotero")
+                # Don't fail the overall process if search was successful but import failed
+        else:
+            logger.error("Zotero import requested but no path or API credentials provided")
+            logger.info("Use --zotero-path OR --zotero-api-key AND --zotero-library-id")
+            # Don't fail the overall process for this error
+    
+    # Generate HTML results page if requested
+    if args.html_results:
+        logger.info(f"Generating HTML results page: {args.html_results}")
+        if generate_html_results_page(records, args.html_results):
+            logger.info(f"HTML results page created successfully: {args.html_results}")
+            logger.info(f"Open this file in your browser and use the 'Import to Zotero' button")
+        else:
+            logger.error(f"Failed to create HTML results page")
+            # Don't fail the overall process for this error
+    
+    # Display results to console if we're not just saving to a file
+    if not args.output:
+        for i, record in enumerate(records, 1):
+            print(f"\n--- Result {i} of {len(records)} ---")
+            print(format_record(record, args.format, args.raw, args.verbose))
+    
+    return success
+
 def search_ixtheo_endpoint(args):
     """
     Search the IxTheo endpoint with the given parameters.
@@ -725,17 +831,21 @@ def search_ixtheo_endpoint(args):
         args: Command line arguments
         
     Returns:
-        True if search was successful, False otherwise
+        Tuple of (success, records) where success is a boolean and records is a list of BiblioRecord objects
     """
     endpoint_id = args.endpoint
     if endpoint_id not in IXTHEO_ENDPOINTS:
         logger.error(f"Unknown IxTheo endpoint: {endpoint_id}")
         logger.info("Use --list --protocol ixtheo to see available IxTheo endpoints")
-        return False
+        return False, []
     
     # Get endpoint info
     endpoint_info = IXTHEO_ENDPOINTS[endpoint_id]
     logger.info(f"Using {endpoint_info['name']} ({endpoint_id}) via IxTheo protocol")
+    
+    # Get the data format from endpoint config, with RIS as the default
+    data_format = endpoint_info.get('format', 'ris').lower()
+    logger.info(f"Using {data_format.upper()} format for record retrieval")
     
     # Create IxTheo search handler
     ixtheo_handler = IxTheoSearchHandler(
@@ -776,56 +886,75 @@ def search_ixtheo_endpoint(args):
         
         if total_results == 0 or not records:
             logger.warning("No results found")
-            return False
+            return False, []
         
         logger.info(f"Found {total_results} results, showing {len(records)} ({search_time:.2f} seconds)")
         
-        # If we need to get export data for each record
-        if args.get_export:
-            logger.info(f"Retrieving {args.format.upper()} export data for each record...")
+        # Get detailed data for each record based on the specified format
+        logger.info(f"Retrieving {data_format.upper()} data for each record...")
+        
+        enhanced_records = []
+        for i, record in enumerate(records):
+            if args.verbose:
+                logger.info(f"Getting {data_format.upper()} data for record {i+1}/{len(records)}: {record.id}")
             
-            # Map output format to IxTheo export format
-            export_format_map = {
-                'bibtex': 'BibTeX',
-                'ris': 'RIS',
-                'marc': 'MARC',
-                'text': 'BibTeX',  # Default for text output
-                'json': 'BibTeX',  # Default for JSON output
-                'zotero': 'BibTeX'  # Default for Zotero output
-            }
-            
-            export_format = export_format_map.get(args.format.lower(), 'BibTeX')
-            
-            # Get export data for each record
-            for i, record in enumerate(records):
-                if args.verbose:
-                    print(f"Getting export data for record {i+1}/{len(records)}...")
+            try:
+                if data_format == 'marc':
+                    # Use MARC format
+                    marc_record = ixtheo_handler.get_record_with_marc(record)
+                    enhanced_records.append(marc_record)
+                elif data_format == 'html':
+                    # Use direct HTML parsing
+                    html_record = ixtheo_handler.client.get_record_with_html(record.id)
+                    if html_record:
+                        enhanced_records.append(html_record)
+                    else:
+                        # Fallback to RIS if HTML parsing fails
+                        logger.warning(f"HTML parsing failed for record {record.id}, falling back to RIS")
+                        ris_record = ixtheo_handler.get_record_with_ris(record)
+                        enhanced_records.append(ris_record)
+                else:
+                    # Default to RIS format
+                    ris_record = ixtheo_handler.get_record_with_ris(record)
+                    enhanced_records.append(ris_record)
+            except Exception as e:
+                logger.warning(f"Error retrieving {data_format.upper()} data for record {record.id}: {e}")
+                logger.warning(f"Falling back to simpler method")
                 
-                records[i] = ixtheo_handler.get_record_with_export(record, export_format)
-        
-        # Handle output to file if specified
-        if args.output:
-            return save_results_to_file(records, args.output, args.format, args.raw, args.verbose)
-        
-        # Display results
-        for i, record in enumerate(records, 1):
-            print(f"\n--- Result {i} of {len(records)} ---")
-            print(format_record(record, args.format, args.raw, args.verbose))
+                try:
+                    # Fallback: try to get at least basic information
+                    if data_format != 'html':
+                        # Try HTML parsing as fallback
+                        html_record = ixtheo_handler.client.get_record_with_html(record.id)
+                        if html_record:
+                            enhanced_records.append(html_record)
+                            continue
+                    
+                    # If all else fails, use the basic record
+                    logger.error(f"All retrieval methods failed for record {record.id}")
+                    enhanced_records.append(record)
+                except Exception as e2:
+                    logger.error(f"Fallback also failed for record {record.id}: {e2}")
+                    enhanced_records.append(record)
+            
+            # Add a small delay to avoid overwhelming the server
+            time.sleep(0.2)
         
         # Show pagination info if applicable
-        if total_results > len(records):
-            remaining = total_results - len(records)
+        if total_results > len(enhanced_records) and not args.output:
+            remaining = total_results - len(enhanced_records)
             if remaining > 0:
                 print(f"\nThere are approximately {remaining} more results available.")
                 print("Use --max-records to adjust the number of results returned.")
         
-        return True
+        return True, enhanced_records
     
     except Exception as e:
         logger.error(f"Error performing IxTheo search: {e}")
         import traceback
         traceback.print_exc()
-        return False
+        return False, []
+
     
 def search_sru_endpoint(args):
     """
@@ -835,13 +964,13 @@ def search_sru_endpoint(args):
         args: Command line arguments
         
     Returns:
-        True if search was successful, False otherwise
+        Tuple of (success, records) where success is a boolean and records is a list of BiblioRecord objects
     """
     endpoint_id = args.endpoint
     if endpoint_id not in SRU_ENDPOINTS:
         logger.error(f"Unknown SRU endpoint: {endpoint_id}")
         logger.info("Use --list --protocol sru to see available SRU endpoints")
-        return False
+        return False, []
     
     # Get endpoint info
     endpoint_info = SRU_ENDPOINTS[endpoint_id]
@@ -851,7 +980,7 @@ def search_sru_endpoint(args):
     query = build_sru_query(args, endpoint_id)
     if not query:
         logger.error("Failed to build SRU query")
-        return False
+        return False, []
     
     # Create SRU client
     sru_client = SRUClient(
@@ -883,32 +1012,22 @@ def search_sru_endpoint(args):
                 logger.info("Example: --endpoint bnf --title \"Python\" --schema dublincore")
             else:
                 logger.warning("No results found")
-            return False
+            return False, []
         
         logger.info(f"Found {total} results, showing {len(records)} ({search_time:.2f} seconds)")
-        
-        # Handle output to file if specified
-        if args.output:
-            return save_results_to_file(records, args.output, args.format, args.raw, args.verbose)
-        
-        # Display results to console
-        for i, record in enumerate(records, 1):
-            print(f"\n--- Result {i} of {len(records)} ---")
-            print(format_record(record, args.format, args.raw, args.verbose))
-        
-        # Show pagination info if applicable
-        if total > len(records):
+            
+        # Show pagination info if applicable and we're not redirecting output
+        if total > len(records) and not args.output:
             remaining = total - (args.start_record - 1 + len(records))
             if remaining > 0:
                 print(f"\nThere are {remaining} more results available.")
                 print(f"Use --start-record {args.start_record + len(records)} to see the next page.")
         
-        return True
+        return True, records
     
     except Exception as e:
         logger.error(f"Error performing SRU search: {e}")
-        return False
-
+        return False, []
 
 def search_oai_endpoint(args):
     """
@@ -918,13 +1037,13 @@ def search_oai_endpoint(args):
         args: Command line arguments
         
     Returns:
-        True if search was successful, False otherwise
+        Tuple of (success, records) where success is a boolean and records is a list of BiblioRecord objects
     """
     endpoint_id = args.endpoint
     if endpoint_id not in OAI_ENDPOINTS:
         logger.error(f"Unknown OAI-PMH endpoint: {endpoint_id}")
         logger.info("Use --list --protocol oai to see available OAI-PMH endpoints")
-        return False
+        return False, []
     
     # Get endpoint info
     endpoint_info = OAI_ENDPOINTS[endpoint_id]
@@ -989,32 +1108,22 @@ def search_oai_endpoint(args):
         
         if total == 0 or not records:
             logger.warning("No results found")
-            return False
+            return False, []
         
         logger.info(f"Found {total} results, showing {len(records)} ({search_time:.2f} seconds)")
         
-        # Handle output to file if specified
-        if args.output:
-            return save_results_to_file(records, args.output, args.format, args.raw, args.verbose)
-        
-        # Display results
-        for i, record in enumerate(records, 1):
-            print(f"\n--- Result {i} of {len(records)} ---")
-            print(format_record(record, args.format, args.raw, args.verbose))
-        
-        # Show pagination info if applicable
-        if total > len(records):
+        # Show pagination info if applicable and we're not redirecting output
+        if total > len(records) and not args.output:
             remaining = total - len(records)
             if remaining > 0:
                 print(f"\nThere are approximately {remaining} more results available.")
                 print("Use --max-records to adjust the number of results returned.")
         
-        return True
+        return True, records
     
     except Exception as e:
         logger.error(f"Error performing OAI-PMH search: {e}")
-        return False
-
+        return False, []
 
 def search_zotero(args):
     """
@@ -1024,7 +1133,7 @@ def search_zotero(args):
         args: Command line arguments
         
     Returns:
-        True if search was successful, False otherwise
+        Tuple of (success, records) where success is a boolean and records is a list of BiblioRecord objects
     """
     # Determine if we're using local database or API
     use_api = args.zotero_api_key and args.zotero_library_id and args.zotero_library_type
@@ -1034,12 +1143,12 @@ def search_zotero(args):
         logger.error("For Zotero searches, specify either:")
         logger.error("  1. Local database: --zotero-path /path/to/zotero.sqlite")
         logger.error("  2. API: --zotero-api-key KEY --zotero-library-id ID --zotero-library-type [user|group]")
-        return False
+        return False, []
     
     if use_api and not ZOTERO_API_AVAILABLE:
         logger.error("Zotero API search requires the pyzotero library.")
         logger.error("Install it with: pip install pyzotero")
-        return False
+        return False, []
     
     logger.info(f"Searching Zotero via {'API' if use_api else 'local database'}")
     
@@ -1057,7 +1166,7 @@ def search_zotero_api(args):
         args: Command line arguments
         
     Returns:
-        True if search was successful, False otherwise
+        Tuple of (success, records) where success is a boolean and records is a list of BiblioRecord objects
     """
     try:
         # Create Zotero API client
@@ -1100,7 +1209,7 @@ def search_zotero_api(args):
         
         if not items:
             logger.warning("No results found")
-            return False
+            return False, []
         
         # Convert Zotero items to BiblioRecords
         records = []
@@ -1138,20 +1247,11 @@ def search_zotero_api(args):
         
         logger.info(f"Found {len(items)} items, showing {len(records)} compatible records ({search_time:.2f} seconds)")
         
-        # Handle output to file if specified
-        if args.output:
-            return save_results_to_file(records, args.output, args.format, args.raw, args.verbose)
-        
-        # Display results
-        for i, record in enumerate(records[:args.max_records], 1):
-            print(f"\n--- Result {i} of {len(records)} ---")
-            print(format_record(record, args.format, args.raw, args.verbose))
-        
-        return True
+        return True, records
     
     except Exception as e:
         logger.error(f"Error searching Zotero API: {e}")
-        return False
+        return False, []
 
 
 def search_zotero_local(args):
@@ -1162,13 +1262,13 @@ def search_zotero_local(args):
         args: Command line arguments
         
     Returns:
-        True if search was successful, False otherwise
+        Tuple of (success, records) where success is a boolean and records is a list of BiblioRecord objects
     """
     try:
         # Check if the database file exists
         if not os.path.isfile(args.zotero_path):
             logger.error(f"Zotero database not found at: {args.zotero_path}")
-            return False
+            return False, []
         
         # Connect to the SQLite database
         conn = sqlite3.connect(args.zotero_path)
@@ -1317,27 +1417,18 @@ def search_zotero_local(args):
         
         if not records:
             logger.warning("No results found")
-            return False
+            return False, []
         
         logger.info(f"Found {len(records)} records ({search_time:.2f} seconds)")
-        
-        # Handle output to file if specified
-        if args.output:
-            return save_results_to_file(records, args.output, args.format, args.raw, args.verbose)
-        
-        # Display results
-        for i, record in enumerate(records[:args.max_records], 1):
-            print(f"\n--- Result {i} of {min(len(records), args.max_records)} ---")
-            print(format_record(record, args.format, args.raw, args.verbose))
-        
-        return True
+        return True, records[:args.max_records]
     
     except sqlite3.Error as e:
         logger.error(f"SQLite error: {e}")
-        return False
+        return False, []
     except Exception as e:
         logger.error(f"Error searching local Zotero database: {e}")
-        return False
+        return False, []
+
 
 
 def save_results_to_file(records, filename, format_type='text', include_raw=False, verbose=False):
@@ -1471,6 +1562,1019 @@ def save_results_to_file(records, filename, format_type='text', include_raw=Fals
         logger.error(f"Error saving to file: {e}")
         return False
 
+def import_to_zotero(records, zotero_path=None, zotero_api_key=None, zotero_library_id=None, zotero_library_type='user'):
+    """
+    Import search results directly into Zotero.
+    
+    Args:
+        records: List of BiblioRecord objects
+        zotero_path: Path to local Zotero database (zotero.sqlite)
+        zotero_api_key: Zotero API key for online library
+        zotero_library_id: Zotero library ID
+        zotero_library_type: Zotero library type ('user' or 'group')
+        
+    Returns:
+        Tuple of (success_count, error_count)
+    """
+    if zotero_api_key and zotero_library_id:
+        return import_to_zotero_api(records, zotero_api_key, zotero_library_id, zotero_library_type)
+    elif zotero_path:
+        return import_to_zotero_local(records, zotero_path)
+    else:
+        logger.error("Either local path or API credentials must be provided")
+        return (0, 0)
+        
+def import_to_zotero_api(records, api_key, library_id, library_type='user'):
+    """Import records to Zotero via API."""
+    if not ZOTERO_API_AVAILABLE:
+        logger.error("Zotero API import requires the pyzotero library.")
+        logger.error("Install it with: pip install pyzotero")
+        return (0, len(records))
+    
+    try:
+        # Create Zotero API client
+        zot = Zotero(
+            library_id=library_id,
+            library_type=library_type,
+            api_key=api_key
+        )
+        
+        success_count = 0
+        error_count = 0
+        
+        # Process records in batches for better performance
+        batch_size = 50
+        for i in range(0, len(records), batch_size):
+            batch = records[i:i+batch_size]
+            items = []
+            
+            # Convert each record to Zotero format
+            for record in batch:
+                item_type = "book" if not record.issn else "journalArticle"
+                
+                # Format creators
+                creators = []
+                for author in record.authors:
+                    creator = {}
+                    if ',' in author:
+                        parts = author.split(',', 1)
+                        creator = {
+                            "creatorType": "author",
+                            "lastName": parts[0].strip(),
+                            "firstName": parts[1].strip() if len(parts) > 1 else ""
+                        }
+                    else:
+                        parts = author.split()
+                        if len(parts) > 1:
+                            creator = {
+                                "creatorType": "author",
+                                "lastName": parts[-1],
+                                "firstName": ' '.join(parts[:-1])
+                            }
+                        else:
+                            creator = {
+                                "creatorType": "author",
+                                "lastName": author,
+                                "firstName": ""
+                            }
+                    creators.append(creator)
+                
+                # Add editors
+                for editor in record.editors:
+                    creator = {}
+                    if ',' in editor:
+                        parts = editor.split(',', 1)
+                        creator = {
+                            "creatorType": "editor",
+                            "lastName": parts[0].strip(),
+                            "firstName": parts[1].strip() if len(parts) > 1 else ""
+                        }
+                    else:
+                        parts = editor.split()
+                        if len(parts) > 1:
+                            creator = {
+                                "creatorType": "editor",
+                                "lastName": parts[-1],
+                                "firstName": ' '.join(parts[:-1])
+                            }
+                        else:
+                            creator = {
+                                "creatorType": "editor",
+                                "lastName": editor,
+                                "firstName": ""
+                            }
+                    creators.append(creator)
+                
+                # Create item template
+                item = {
+                    'itemType': item_type,
+                    'title': record.title,
+                    'creators': creators,
+                    'date': record.year,
+                    'publisher': record.publisher_name,
+                    'place': record.place_of_publication,
+                    'ISBN': record.isbn,
+                    'ISSN': record.issn,
+                    'series': record.series,
+                    'edition': record.edition,
+                    'language': record.language,
+                    'url': record.urls[0] if record.urls else "",
+                    'abstractNote': record.abstract,
+                    'tags': [{"tag": subject} for subject in record.subjects]
+                }
+                
+                # Clean up None values
+                item = {k: v for k, v in item.items() if v is not None}
+                items.append(item)
+            
+            # Create items in batch
+            try:
+                if items:
+                    created = zot.create_items(items)
+                    if created:
+                        success_count += len(created)
+                    else:
+                        error_count += len(items)
+            except Exception as e:
+                logger.error(f"Error creating batch in Zotero: {e}")
+                error_count += len(items)
+        
+        logger.info(f"Imported {success_count} items to Zotero API library")
+        if error_count > 0:
+            logger.warning(f"Failed to import {error_count} items")
+        
+        return (success_count, error_count)
+    
+    except Exception as e:
+        logger.error(f"Error importing to Zotero API: {e}")
+        return (0, len(records))
+
+def import_to_zotero_local(records, zotero_path):
+    """
+    Import records to a local Zotero database.
+    
+    Note: Direct SQLite writing is risky and may corrupt the database.
+    This function attempts to be safe but should be used with caution.
+    If possible, use the Zotero API or export to a file that Zotero can import.
+    """
+    import os
+    import sqlite3
+    import json
+    import uuid
+    from datetime import datetime
+    
+    if not os.path.isfile(zotero_path):
+        logger.error(f"Zotero database not found at: {zotero_path}")
+        return (0, len(records))
+    
+    # Backup the database before modifying
+    backup_path = f"{zotero_path}.bak"
+    try:
+        import shutil
+        shutil.copy2(zotero_path, backup_path)
+        logger.info(f"Created backup of Zotero database at {backup_path}")
+    except Exception as e:
+        logger.error(f"Failed to create backup: {e}")
+        logger.error("Aborting import for safety")
+        return (0, len(records))
+    
+    try:
+        # Connect to the SQLite database
+        conn = sqlite3.connect(zotero_path)
+        conn.isolation_level = 'EXCLUSIVE'  # For transaction safety
+        cursor = conn.cursor()
+        
+        success_count = 0
+        error_count = 0
+        
+        # Start a transaction
+        cursor.execute("BEGIN TRANSACTION")
+        
+        # Get next itemID
+        cursor.execute("SELECT MAX(itemID) FROM items")
+        max_item_id = cursor.fetchone()[0] or 0
+        next_item_id = max_item_id + 1
+        
+        # Get fieldIDs for common fields
+        cursor.execute("SELECT fieldID, fieldName FROM fields")
+        field_map = {row[1]: row[0] for row in cursor.fetchall()}
+        
+        # Get itemType IDs
+        cursor.execute("SELECT itemTypeID, typeName FROM itemTypes")
+        item_type_map = {row[1]: row[0] for row in cursor.fetchall()}
+        
+        # Current timestamp for all new items
+        timestamp = int(datetime.now().timestamp() * 1000)
+        
+        # Process each record
+        for i, record in enumerate(records):
+            try:
+                # Generate a unique key
+                item_key = str(uuid.uuid4()).replace('-', '')
+                
+                # Determine item type
+                item_type = "book"
+                if record.issn:
+                    item_type = "journalArticle"
+                
+                item_type_id = item_type_map.get(item_type, 1)  # Default to book (1) if not found
+                
+                # Insert into items table
+                cursor.execute(
+                    "INSERT INTO items (itemID, itemTypeID, key, dateAdded, dateModified) VALUES (?, ?, ?, ?, ?)",
+                    (next_item_id + i, item_type_id, item_key, timestamp, timestamp)
+                )
+                
+                # Insert fields
+                fields_to_insert = {
+                    'title': record.title,
+                    'date': record.year,
+                    'publisher': record.publisher_name,
+                    'place': record.place_of_publication,
+                    'ISBN': record.isbn,
+                    'ISSN': record.issn,
+                    'series': record.series,
+                    'edition': record.edition,
+                    'language': record.language,
+                    'url': record.urls[0] if record.urls else None,
+                    'abstractNote': record.abstract
+                }
+                
+                # Insert non-null fields
+                for field_name, value in fields_to_insert.items():
+                    if value is not None and field_name in field_map:
+                        # Insert into itemData if needed
+                        cursor.execute(
+                            "INSERT INTO itemDataValues (value) VALUES (?)",
+                            (value,)
+                        )
+                        value_id = cursor.lastrowid
+                        
+                        cursor.execute(
+                            "INSERT INTO itemData (itemID, fieldID, valueID) VALUES (?, ?, ?)",
+                            (next_item_id + i, field_map[field_name], value_id)
+                        )
+                
+                # Insert creators
+                creator_order = 0
+                for author in record.authors:
+                    # Create creator data
+                    first_name = ""
+                    last_name = ""
+                    
+                    if ',' in author:
+                        parts = author.split(',', 1)
+                        last_name = parts[0].strip()
+                        first_name = parts[1].strip() if len(parts) > 1 else ""
+                    else:
+                        parts = author.split()
+                        if len(parts) > 1:
+                            last_name = parts[-1]
+                            first_name = ' '.join(parts[:-1])
+                        else:
+                            last_name = author
+                    
+                    # Insert into creatorData
+                    cursor.execute(
+                        "INSERT INTO creatorData (firstName, lastName) VALUES (?, ?)",
+                        (first_name, last_name)
+                    )
+                    creator_data_id = cursor.lastrowid
+                    
+                    # Insert into creators (linking to item)
+                    cursor.execute(
+                        "INSERT INTO creators (itemID, creatorDataID, creatorTypeID, orderIndex) VALUES (?, ?, ?, ?)",
+                        (next_item_id + i, creator_data_id, 1, creator_order)  # 1 is author type
+                    )
+                    creator_order += 1
+                
+                # Insert editors
+                for editor in record.editors:
+                    # Create creator data
+                    first_name = ""
+                    last_name = ""
+                    
+                    if ',' in editor:
+                        parts = editor.split(',', 1)
+                        last_name = parts[0].strip()
+                        first_name = parts[1].strip() if len(parts) > 1 else ""
+                    else:
+                        parts = editor.split()
+                        if len(parts) > 1:
+                            last_name = parts[-1]
+                            first_name = ' '.join(parts[:-1])
+                        else:
+                            last_name = editor
+                    
+                    # Insert into creatorData
+                    cursor.execute(
+                        "INSERT INTO creatorData (firstName, lastName) VALUES (?, ?)",
+                        (first_name, last_name)
+                    )
+                    creator_data_id = cursor.lastrowid
+                    
+                    # Insert into creators (linking to item)
+                    cursor.execute(
+                        "INSERT INTO creators (itemID, creatorDataID, creatorTypeID, orderIndex) VALUES (?, ?, ?, ?)",
+                        (next_item_id + i, creator_data_id, 3, creator_order)  # 3 is editor type
+                    )
+                    creator_order += 1
+                
+                # Insert tags
+                for subject in record.subjects:
+                    # Check if tag exists
+                    cursor.execute("SELECT tagID FROM tags WHERE name = ?", (subject,))
+                    tag_row = cursor.fetchone()
+                    
+                    if tag_row:
+                        tag_id = tag_row[0]
+                    else:
+                        cursor.execute("INSERT INTO tags (name) VALUES (?)", (subject,))
+                        tag_id = cursor.lastrowid
+                    
+                    # Link tag to item
+                    cursor.execute(
+                        "INSERT INTO itemTags (itemID, tagID) VALUES (?, ?)",
+                        (next_item_id + i, tag_id)
+                    )
+                
+                success_count += 1
+            except Exception as e:
+                logger.error(f"Error processing record {i+1}: {e}")
+                error_count += 1
+        
+        # Commit transaction
+        conn.commit()
+        logger.info(f"Successfully imported {success_count} items to local Zotero database")
+        if error_count > 0:
+            logger.warning(f"Failed to import {error_count} items")
+        
+        return (success_count, error_count)
+    
+    except sqlite3.Error as e:
+        logger.error(f"SQLite error: {e}")
+        try:
+            conn.rollback()
+            logger.info("Changes rolled back")
+        except:
+            pass
+        return (0, len(records))
+    except Exception as e:
+        logger.error(f"Error importing to local Zotero database: {e}")
+        try:
+            conn.rollback()
+            logger.info("Changes rolled back")
+        except:
+            pass
+        return (0, len(records))
+    finally:
+        if 'conn' in locals() and conn:
+            conn.close()
+
+def generate_zotero_translator_code(records):
+    """
+    Generate JavaScript code compatible with Zotero Translator format.
+    This can be used for browser integration with Zotero.
+    
+    Args:
+        records: List of BiblioRecord objects
+        
+    Returns:
+        JavaScript code for Zotero Translator
+    """
+    js_code = """
+// ==UserScript==
+// @name         Library Search Results to Zotero
+// @namespace    http://tampermonkey.net/
+// @version      0.1
+// @description  Import search results from library_search.py to Zotero
+// @author       library_search.py
+// @match        file://*library_search_results.html
+// @grant        none
+// ==/UserScript==
+
+(function() {
+    'use strict';
+    
+    // Add a button to the page
+    const button = document.createElement('button');
+    button.textContent = 'Import to Zotero';
+    button.style.cssText = 'position: fixed; top: 10px; right: 10px; padding: 10px; background: #2196F3; color: white; border: none; border-radius: 4px; cursor: pointer;';
+    document.body.appendChild(button);
+    
+    // Add Zotero connector detection
+    let zoteroConnector = false;
+    if (typeof Zotero !== 'undefined') {
+        zoteroConnector = true;
+        button.textContent = 'Import to Zotero (Connector Found)';
+    }
+    
+    // Records data
+    const records = """
+    
+    # Add records as JSON
+    js_code += json.dumps([record.to_dict() for record in records], indent=2)
+    
+    js_code += """;
+    
+    // Convert records to Zotero format
+    function convertToZotero(record) {
+        let itemType = record.issn ? "journalArticle" : "book";
+        
+        let creators = [];
+        for (let author of record.authors || []) {
+            let creator = {creatorType: "author"};
+            if (author.includes(',')) {
+                let parts = author.split(',', 2);
+                creator.lastName = parts[0].trim();
+                creator.firstName = parts[1] ? parts[1].trim() : "";
+            } else {
+                let parts = author.split(' ');
+                if (parts.length > 1) {
+                    creator.lastName = parts[parts.length - 1];
+                    creator.firstName = parts.slice(0, parts.length - 1).join(' ');
+                } else {
+                    creator.lastName = author;
+                    creator.firstName = "";
+                }
+            }
+            creators.push(creator);
+        }
+        
+        // Add editors
+        for (let editor of record.editors || []) {
+            let creator = {creatorType: "editor"};
+            if (editor.includes(',')) {
+                let parts = editor.split(',', 2);
+                creator.lastName = parts[0].trim();
+                creator.firstName = parts[1] ? parts[1].trim() : "";
+            } else {
+                let parts = editor.split(' ');
+                if (parts.length > 1) {
+                    creator.lastName = parts[parts.length - 1];
+                    creator.firstName = parts.slice(0, parts.length - 1).join(' ');
+                } else {
+                    creator.lastName = editor;
+                    creator.firstName = "";
+                }
+            }
+            creators.push(creator);
+        }
+        
+        return {
+            itemType: itemType,
+            title: record.title,
+            creators: creators,
+            date: record.year,
+            publisher: record.publisher_name,
+            place: record.place_of_publication,
+            ISBN: record.isbn,
+            ISSN: record.issn,
+            series: record.series,
+            edition: record.edition,
+            language: record.language,
+            url: record.urls && record.urls.length > 0 ? record.urls[0] : "",
+            abstractNote: record.abstract,
+            tags: (record.subjects || []).map(subject => ({tag: subject}))
+        };
+    }
+    
+    // Handle button click
+    button.addEventListener('click', function() {
+        if (zoteroConnector) {
+            try {
+                const zoteroItems = records.map(convertToZotero);
+                Zotero.ModalPrompt.show("Library Search Results", 
+                    `Importing ${zoteroItems.length} items to Zotero...`);
+                
+                Zotero.Connector.saveItems(zoteroItems)
+                    .then(function(result) {
+                        Zotero.ModalPrompt.show("Import Successful", 
+                            `Successfully imported ${result.items.length} items to Zotero.`);
+                    })
+                    .catch(function(error) {
+                        Zotero.ModalPrompt.show("Import Error", 
+                            `Error importing to Zotero: ${error.message || error}`);
+                        console.error("Zotero import error:", error);
+                    });
+            } catch (e) {
+                alert(`Error connecting to Zotero: ${e.message || e}`);
+                console.error(e);
+            }
+        } else {
+            // No Zotero connector found - generate RIS for download
+            let risContent = "";
+            for (let record of records) {
+                // Create RIS format
+                let recordType = record.issn ? "JOUR" : "BOOK";
+                risContent += "TY  - " + recordType + "\\r\\n";
+                
+                // Add ID
+                risContent += "ID  - " + record.id + "\\r\\n";
+                
+                // Add title
+                risContent += "TI  - " + record.title + "\\r\\n";
+                
+                // Add authors
+                for (let author of record.authors || []) {
+                    risContent += "AU  - " + author + "\\r\\n";
+                }
+                
+                // Add editors
+                for (let editor of record.editors || []) {
+                    risContent += "ED  - " + editor + "\\r\\n";
+                }
+                
+                // Add year
+                if (record.year) {
+                    risContent += "PY  - " + record.year + "\\r\\n";
+                }
+                
+                // Add publisher
+                if (record.publisher_name) {
+                    risContent += "PB  - " + record.publisher_name + "\\r\\n";
+                }
+                
+                // Add ISBN
+                if (record.isbn) {
+                    risContent += "SN  - " + record.isbn + "\\r\\n";
+                }
+                
+                // Add ISSN
+                if (record.issn) {
+                    risContent += "SN  - " + record.issn + "\\r\\n";
+                }
+                
+                // Add subjects
+                for (let subject of record.subjects || []) {
+                    risContent += "KW  - " + subject + "\\r\\n";
+                }
+                
+                // End record
+                risContent += "ER  - \\r\\n\\r\\n";
+            }
+            
+            // Create and click a download link
+            const blob = new Blob([risContent], {type: 'application/x-research-info-systems'});
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'library_search_results.ris';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            
+            alert('Zotero Connector not found. Downloaded results as RIS file that can be imported manually into Zotero.');
+        }
+    });
+})();
+"""
+    return js_code
+
+def generate_html_results_page(records, output_file, auto_open=True):
+    """
+    Generate an HTML page with the search results and automatically serve it locally.
+    
+    Args:
+        records: List of BiblioRecord objects
+        output_file: Path to output HTML file
+        auto_open: Whether to automatically open the browser
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    import os
+    import threading
+    import http.server
+    import socketserver
+    import webbrowser
+    import time
+    from pathlib import Path
+    
+    try:
+        # Generate the RIS data for all records
+        ris_data = ""
+        for record in records:
+            # Determine record type
+            if record.issn:
+                record_type = "JOUR"  # Journal article
+            elif record.series:
+                record_type = "CHAP"  # Book chapter
+            else:
+                record_type = "BOOK"  # Book
+            
+            # Start building RIS entry
+            ris_data += "TY  - " + record_type + "\\r\\n"
+            
+            # Add ID
+            ris_data += f"ID  - {record.id}\\r\\n"
+            
+            # Add title
+            ris_data += f"TI  - {record.title}\\r\\n"
+            
+            # Add authors
+            for author in record.authors:
+                ris_data += f"AU  - {author}\\r\\n"
+            
+            # Add editors
+            for editor in record.editors:
+                ris_data += f"ED  - {editor}\\r\\n"
+            
+            # Add year
+            if record.year:
+                ris_data += f"PY  - {record.year}\\r\\n"
+                ris_data += f"Y1  - {record.year}///\\r\\n"  # Year with // for month/day
+            
+            # Add publisher
+            if record.publisher_name:
+                ris_data += f"PB  - {record.publisher_name}\\r\\n"
+            
+            # Add place of publication
+            if record.place_of_publication:
+                ris_data += f"CY  - {record.place_of_publication}\\r\\n"
+            
+            # Add ISBN
+            if record.isbn:
+                ris_data += f"SN  - {record.isbn}\\r\\n"
+            
+            # Add ISSN
+            if record.issn:
+                ris_data += f"SN  - {record.issn}\\r\\n"
+            
+            # Add edition
+            if record.edition:
+                ris_data += f"ET  - {record.edition}\\r\\n"
+            
+            # Add series
+            if record.series:
+                ris_data += f"T2  - {record.series}\\r\\n"
+            
+            # Add language
+            if record.language:
+                ris_data += f"LA  - {record.language}\\r\\n"
+            
+            # Add URLs
+            for url in record.urls:
+                ris_data += f"UR  - {url}\\r\\n"
+            
+            # Add abstract
+            if record.abstract:
+                ris_data += f"AB  - {record.abstract}\\r\\n"
+            
+            # Add keywords (from subjects)
+            for subject in record.subjects:
+                ris_data += f"KW  - {subject}\\r\\n"
+            
+            # End record
+            ris_data += "ER  - \\r\\n\\r\\n"
+        
+        # Create HTML content
+        html = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Library Search Results</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        h1 {
+            color: #2c3e50;
+            margin-bottom: 20px;
+        }
+        .instructions {
+            background-color: #f8f9fa;
+            border-left: 4px solid #2196F3;
+            padding: 15px;
+            margin-bottom: 20px;
+        }
+        .record {
+            background-color: #f9f9f9;
+            border-left: 4px solid #2196F3;
+            padding: 15px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        .record h2 {
+            margin-top: 0;
+            color: #2c3e50;
+        }
+        .field {
+            margin-bottom: 8px;
+        }
+        .field-name {
+            font-weight: bold;
+            color: #555;
+        }
+        .tag {
+            display: inline-block;
+            background: #e1f5fe;
+            color: #0277bd;
+            padding: 2px 8px;
+            margin-right: 5px;
+            margin-bottom: 5px;
+            border-radius: 3px;
+            font-size: 0.9em;
+        }
+        #importButtons {
+            margin-bottom: 30px;
+        }
+        .button {
+            padding: 10px 15px;
+            background: #2196F3;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-right: 10px;
+            text-decoration: none;
+            display: inline-block;
+        }
+        .button:hover {
+            background: #0b7dda;
+        }
+        .status-message {
+            margin-top: 10px;
+            padding: 10px;
+            border-radius: 4px;
+        }
+        .success {
+            background-color: #d4edda;
+            color: #155724;
+        }
+        .error {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+        .info {
+            background-color: #cce5ff;
+            color: #004085;
+        }
+    </style>
+</head>
+<body>
+    <h1>Library Search Results (<span id="recordCount">""" + str(len(records)) + """</span> records)</h1>
+    
+    <div class="instructions">
+        <h3>Import Options:</h3>
+        <p>1. If you have the Zotero Connector browser extension installed, you can try using the "Import with Zotero Connector" button.</p>
+        <p>2. Alternatively, you can download the RIS file and import it manually into Zotero:</p>
+        <ul>
+            <li>Click "Download RIS File"</li>
+            <li>In Zotero, select File → Import...</li>
+            <li>Choose the downloaded RIS file</li>
+        </ul>
+    </div>
+
+    <div id="importButtons">
+        <button id="connectorButton" class="button">Import with Zotero Connector</button>
+        <button id="downloadButton" class="button">Download RIS File</button>
+    </div>
+    
+    <div id="statusMessage" class="status-message" style="display: none;"></div>
+    
+    <h2>Records:</h2>
+    <div id="records">
+"""
+        
+        # Add each record
+        for i, record in enumerate(records, 1):
+            html += f"""
+        <div class="record" data-record-index="{i-1}">
+            <h2>{record.title}</h2>
+            
+            <div class="field">
+                <span class="field-name">Authors:</span> {', '.join(record.authors) if record.authors else 'N/A'}
+            </div>
+"""
+            
+            if record.editors:
+                html += f"""
+            <div class="field">
+                <span class="field-name">Editors:</span> {', '.join(record.editors)}
+            </div>
+"""
+            
+            if record.year:
+                html += f"""
+            <div class="field">
+                <span class="field-name">Year:</span> {record.year}
+            </div>
+"""
+            
+            if record.publisher_name:
+                html += f"""
+            <div class="field">
+                <span class="field-name">Publisher:</span> {record.publisher_name}
+            </div>
+"""
+            
+            if record.place_of_publication:
+                html += f"""
+            <div class="field">
+                <span class="field-name">Place:</span> {record.place_of_publication}
+            </div>
+"""
+            
+            if record.isbn:
+                html += f"""
+            <div class="field">
+                <span class="field-name">ISBN:</span> {record.isbn}
+            </div>
+"""
+            
+            if record.issn:
+                html += f"""
+            <div class="field">
+                <span class="field-name">ISSN:</span> {record.issn}
+            </div>
+"""
+            
+            if record.language:
+                html += f"""
+            <div class="field">
+                <span class="field-name">Language:</span> {record.language}
+            </div>
+"""
+            
+            if record.abstract:
+                html += f"""
+            <div class="field">
+                <span class="field-name">Abstract:</span> {record.abstract}
+            </div>
+"""
+            
+            if record.subjects:
+                html += """
+            <div class="field">
+                <span class="field-name">Subjects:</span><br>
+"""
+                for subject in record.subjects:
+                    html += f"""
+                <span class="tag">{subject}</span>
+"""
+                html += """
+            </div>
+"""
+            
+            html += """
+        </div>
+"""
+        
+        # Add script with embedded RIS data
+        html += """
+    </div>
+
+    <script>
+        // Store the RIS data
+        const risData = `""" + ris_data + """`;
+        
+        // Status message handling
+        function showStatus(message, type) {
+            const statusEl = document.getElementById('statusMessage');
+            statusEl.textContent = message;
+            statusEl.className = 'status-message ' + type;
+            statusEl.style.display = 'block';
+            setTimeout(() => {
+                statusEl.style.display = 'none';
+            }, 5000);
+        }
+        
+        // Handle Zotero Connector button
+        document.getElementById('connectorButton').addEventListener('click', function() {
+            if (typeof Zotero !== 'undefined' && Zotero.Connector && Zotero.Connector.saveItems) {
+                try {
+                    // Prepare items in translator format
+                    const items = [];
+                    document.querySelectorAll('.record').forEach(record => {
+                        const title = record.querySelector('h2').textContent;
+                        const authorElement = record.querySelector('.field:nth-child(2)');
+                        const authors = authorElement ? authorElement.textContent.replace('Authors:', '').trim() : '';
+                        
+                        items.push({
+                            itemType: 'book',
+                            title: title,
+                            creators: authors.split(', ').map(author => {
+                                const parts = author.split(' ');
+                                if (parts.length > 1) {
+                                    return {
+                                        lastName: parts[parts.length - 1],
+                                        firstName: parts.slice(0, -1).join(' '),
+                                        creatorType: 'author'
+                                    };
+                                }
+                                return { lastName: author, creatorType: 'author' };
+                            })
+                        });
+                    });
+
+                    Zotero.Connector.saveItems(items)
+                        .then(result => {
+                            showStatus('Successfully imported ' + result.length + ' items to Zotero', 'success');
+                        })
+                        .catch(error => {
+                            showStatus('Error using Zotero Connector: ' + error.message, 'error');
+                            console.error('Zotero connector error:', error);
+                        });
+                } catch (e) {
+                    showStatus('Error with Zotero Connector: ' + e.message, 'error');
+                    console.error('Error:', e);
+                }
+            } else {
+                showStatus('Zotero Connector not found. Please install the Zotero Connector browser extension.', 'info');
+                window.open('https://www.zotero.org/download/connectors', '_blank');
+            }
+        });
+        
+        // Handle download button
+        document.getElementById('downloadButton').addEventListener('click', function() {
+            const blob = new Blob([risData], {type: 'application/x-research-info-systems'});
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'library_search_results.ris';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            
+            showStatus('RIS file downloaded. You can now import it into Zotero.', 'success');
+        });
+    </script>
+</body>
+</html>
+"""
+        
+        # Write to file
+        with open(output_file, 'w', encoding='utf-8') as f:
+            f.write(html)
+        
+        logger.info(f"Generated HTML results page: {output_file}")
+        
+        # Start a local HTTP server in a separate thread
+        output_dir = os.path.dirname(os.path.abspath(output_file))
+        filename = os.path.basename(output_file)
+        
+        # Find an available port
+        def find_free_port():
+            with socketserver.TCPServer(("", 0), None) as s:
+                return s.server_address[1]
+        
+        port = find_free_port()
+        
+        # Create a custom HTTP request handler that sets the correct MIME type
+        class CustomHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, directory=output_dir, **kwargs)
+            
+            def end_headers(self):
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Methods", "GET")
+                self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+                return super().end_headers()
+        
+        # Create and start the server
+        handler = CustomHTTPRequestHandler
+        httpd = socketserver.TCPServer(("", port), handler)
+        
+        server_thread = threading.Thread(target=httpd.serve_forever)
+        server_thread.daemon = True
+        server_thread.start()
+        
+        url = f"http://localhost:{port}/{filename}"
+        logger.info(f"Serving results at {url}")
+        
+        # Open the browser if requested
+        if auto_open:
+            logger.info("Opening browser...")
+            # Small delay to ensure server is ready
+            time.sleep(0.5)
+            webbrowser.open(url)
+            
+            # Print instructions for manual import
+            print("\n" + "="*60)
+            print(f"Library search results are now available at: {url}")
+            print("This page will remain available as long as this script is running.")
+            print("To import results to Zotero:")
+            print("  1. Use the 'Import with Zotero Connector' button if you have the browser extension")
+            print("  2. Or download the RIS file and import it into Zotero manually")
+            print("="*60 + "\n")
+        
+        return True
+    
+    except Exception as e:
+        logger.error(f"Error generating and serving HTML results page: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
 
 def create_custom_endpoint(args):
     """Create a custom SRU or OAI-PMH endpoint configuration."""
@@ -1669,15 +2773,30 @@ def parse_args():
     zotero_group.add_argument('--zotero-library-type', choices=['user', 'group'], default='user',
                           help='Zotero library type (user or group)')
     
+    # Enhanced Zotero integration options
+    zotero_group.add_argument('--import-to-zotero', action='store_true',
+                          help='Import search results directly to Zotero')
+    zotero_group.add_argument('--html-results', 
+                          help='Generate HTML results page with Zotero integration')
+    zotero_group.add_argument('--zotero-collection',
+                          help='Import to a specific Zotero collection (requires Zotero API)')
+    zotero_group.add_argument('--zotero-tags', nargs='+',
+                          help='Add these tags to all imported items')
+    zotero_group.add_argument('--zotero-notes', 
+                          help='Add this note to all imported items')
+    
+    # Options for advanced Zotero features
+    zotero_group.add_argument('--check-duplicates', action='store_true',
+                          help='Check for duplicates before importing to Zotero')
+    zotero_group.add_argument('--deduplicate', action='store_true',
+                          help='Attempt to deduplicate results before importing')
+    
     # IxTheo specific parameters
     ixtheo_group = parser.add_argument_group('IxTheo Parameters')
     ixtheo_group.add_argument('--format-filter',
                            help='Filter by format (e.g., "Article", "Book")')
     ixtheo_group.add_argument('--language-filter',
                            help='Filter by language (e.g., "German", "English")')
-    ixtheo_group.add_argument('--get-export',
-                           action='store_true',
-                           help='Retrieve export data for each record')
     
     # Output format
     output_group = parser.add_argument_group('Output Parameters')
@@ -1754,20 +2873,26 @@ def main():
     
     # Perform search based on protocol
     if args.protocol == 'sru':
-        success = search_sru_endpoint(args)
+        search_success, records = search_sru_endpoint(args)
     elif args.protocol == 'oai':
-        success = search_oai_endpoint(args)
+        search_success, records = search_oai_endpoint(args)
     elif args.protocol == 'zotero':
-        success = search_zotero(args)
+        search_success, records = search_zotero(args)
     elif args.protocol == 'ixtheo':
-        success = search_ixtheo_endpoint(args)
+        search_success, records = search_ixtheo_endpoint(args)
     else:
         logger.error(f"Unknown protocol: {args.protocol}")
         logger.info("Valid protocols are: sru, oai, zotero, ixtheo")
-        success = False
+        search_success = False
+        records = []
     
-    sys.exit(0 if success else 1)
-
+    # If search was successful, handle output
+    output_success = True
+    if search_success and records:
+        output_success = handle_search_output(records, args)
+    
+    # Exit with success if both search and output handling were successful
+    sys.exit(0 if search_success and output_success else 1)
 
 if __name__ == "__main__":
     main()

@@ -394,6 +394,12 @@ class IxTheoClient:
                         if subject_text:
                             subjects.append(subject_text)
                     
+                    # Get publisher name if available
+                    publisher = None
+                    publisher_elem = item.select_one('.publisher')
+                    if publisher_elem:
+                        publisher = publisher_elem.get_text(strip=True)
+                    
                     # Build result object
                     result = {
                         "id": item_id,
@@ -401,7 +407,8 @@ class IxTheoClient:
                         "authors": authors,
                         "formats": formats,
                         "year": year,
-                        "subjects": subjects
+                        "subjects": subjects,
+                        "publisher": publisher
                     }
                     
                     results.append(result)
@@ -476,7 +483,8 @@ class IxTheoClient:
             logger.error(f"Export request error for record {record_id}: {e}")
             return None
     
-    def get_detailed_record(self, record_id):
+    def get_record_with_html(self, record_id):
+    
         """
         Get detailed information for a specific record
         
@@ -499,85 +507,187 @@ class IxTheoClient:
             # Parse record details
             soup = BeautifulSoup(response.text, 'html.parser')
             
-            # Extract title
+            # Extract title - find the h3 tag with the title
             title = "Unknown Title"
-            title_elem = soup.select_one('.record .title')
+            title_elem = soup.select_one('h3[property="name"]')
             if title_elem:
                 title = title_elem.get_text(strip=True)
             
-            # Extract authors
+            # Extract authors - look in the bibliographic details table
             authors = []
-            author_elements = soup.select('.record .authors a')
-            for author_elem in author_elements:
-                author_text = author_elem.get_text(strip=True)
-                if author_text:
-                    authors.append(author_text)
+            for row in soup.select('table.table-striped tr'):
+                header = row.select_one('th')
+                if header and 'Author' in header.get_text():
+                    author_cell = row.select_one('td')
+                    if author_cell:
+                        author_spans = author_cell.select('span[property="name"]')
+                        for span in author_spans:
+                            author_text = span.get_text(strip=True)
+                            if author_text:
+                                authors.append(author_text)
+            
+            # Extract format
+            format_str = ""
+            format_row = soup.select_one('table.table-striped tr th:-soup-contains("Format:")')
+            if format_row:
+                format_cell = format_row.find_next_sibling('td')
+                if format_cell:
+                    format_spans = format_cell.select('span.format')
+                    for span in format_spans:
+                        format_type = span.get_text(strip=True)
+                        format_str += format_type
+            
+            # Extract language
+            language = None
+            language_row = soup.select_one('table.table-striped tr th:-soup-contains("Language:")')
+            if language_row and language_row.find_next_sibling('td'):
+                language = language_row.find_next_sibling('td').get_text(strip=True)
             
             # Extract publication info
             publisher = None
-            pub_date = None
             pub_place = None
-            
-            # Try to extract from different fields
-            pub_info_elem = soup.select_one('.record .publisher')
-            if pub_info_elem:
-                pub_info = pub_info_elem.get_text(strip=True)
-                # Try to parse publisher, place, and date
-                # Format often like: "Publisher: Place, Date"
-                if ':' in pub_info:
-                    publisher_part = pub_info.split(':', 1)[1].strip()
-                    if ',' in publisher_part:
-                        publisher_parts = publisher_part.split(',')
-                        publisher = publisher_parts[0].strip()
-                        if len(publisher_parts) > 1:
-                            pub_date = publisher_parts[-1].strip()
-                            if len(publisher_parts) > 2:
-                                pub_place = ",".join(publisher_parts[1:-1]).strip()
-                    else:
-                        publisher = publisher_part
-            
-            # Extract year from pub_date if not explicitly found
             year = None
-            if pub_date:
-                year_match = re.search(r'\b(19|20)\d{2}\b', pub_date)
-                if year_match:
-                    year = year_match.group(0)
+            
+            # Try finding the publication information
+            published_row = soup.select_one('table.table-striped tr th:-soup-contains("Published:")')
+            if published_row:
+                published_cell = published_row.find_next_sibling('td')
+                if published_cell:
+                    # Extract location
+                    location_elem = published_cell.select_one('span[property="location"]')
+                    if location_elem:
+                        pub_place = location_elem.get_text(strip=True)
+                    
+                    # Extract publisher
+                    publisher_elem = published_cell.select_one('span[property="name"]')
+                    if publisher_elem:
+                        publisher = publisher_elem.get_text(strip=True)
+                    
+                    # Extract year
+                    date_elem = published_cell.select_one('span[property="datePublished"]')
+                    if date_elem:
+                        year = date_elem.get_text(strip=True)
             
             # Extract subjects
             subjects = []
-            subject_elements = soup.select('.record .subject a')
-            for subject_elem in subject_elements:
-                subject_text = subject_elem.get_text(strip=True)
-                if subject_text:
-                    subjects.append(subject_text)
-            
-            # Extract abstract/summary
-            abstract = None
-            abstract_elem = soup.select_one('.record .summary')
-            if abstract_elem:
-                abstract = abstract_elem.get_text(strip=True)
+            # Find subject rows - there may be multiple
+            subject_rows = soup.select('table.table-striped tr th:-soup-contains("Subject")')
+            for row in subject_rows:
+                subject_cell = row.find_next_sibling('td')
+                if subject_cell:
+                    # Get all subject links
+                    for link in subject_cell.select('a[href*="/Search/Results"]'):
+                        subject_text = link.get_text(strip=True)
+                        if subject_text and subject_text not in subjects:
+                            subjects.append(subject_text)
             
             # Extract ISBN/ISSN
             isbn = None
             issn = None
             
-            # Look for ISBN
-            isbn_elem = soup.select_one('.record .isbn')
-            if isbn_elem:
-                isbn_text = isbn_elem.get_text(strip=True)
-                isbn_match = re.search(r'\b\d[\d\-]+\d\b', isbn_text)
-                if isbn_match:
-                    isbn = isbn_match.group(0)
+            isbn_row = soup.select_one('.description-tab table.table-striped tr th:-soup-contains("ISBN:")')
+            if isbn_row:
+                isbn_cell = isbn_row.find_next_sibling('td')
+                if isbn_cell:
+                    span = isbn_cell.select_one('span[property="isbn"]')
+                    if span:
+                        isbn = span.get_text(strip=True)
+                    else:
+                        isbn = isbn_cell.get_text(strip=True)
             
-            # Look for ISSN
-            issn_elem = soup.select_one('.record .issn')
-            if issn_elem:
-                issn_text = issn_elem.get_text(strip=True)
-                issn_match = re.search(r'\b\d{4}-\d{3}[\dX]\b', issn_text)
-                if issn_match:
-                    issn = issn_match.group(0)
+            issn_row = soup.select_one('.description-tab table.table-striped tr th:-soup-contains("ISSN:")')
+            if issn_row:
+                issn_cell = issn_row.find_next_sibling('td')
+                if issn_cell:
+                    span = issn_cell.select_one('span[property="issn"]')
+                    if span:
+                        issn = span.get_text(strip=True)
+                    else:
+                        issn = issn_cell.get_text(strip=True)
             
-            # Create BiblioRecord
+            # Extract physical description (extent)
+            extent = None
+            phys_desc_row = soup.select_one('.description-tab table.table-striped tr th:-soup-contains("Physical Description:")')
+            if phys_desc_row:
+                phys_desc_cell = phys_desc_row.find_next_sibling('td')
+                if phys_desc_cell:
+                    extent = phys_desc_cell.get_text(strip=True)
+            
+            # Extract series
+            series = None
+            series_row = soup.select_one('table.table-striped tr th:-soup-contains("Series")')
+            if series_row:
+                series_cell = series_row.find_next_sibling('td')
+                if series_cell:
+                    series_link = series_cell.select_one('a')
+                    if series_link:
+                        series = series_link.get_text(strip=True)
+            
+            # Extract journal info - volume, issue, pages
+            journal_title = None
+            volume = None
+            issue = None
+            pages = None
+            
+            journal_row = soup.select_one('table.table-striped tr th:-soup-contains("In:")')
+            if journal_row:
+                journal_cell = journal_row.find_next_sibling('td')
+                if journal_cell:
+                    journal_link = journal_cell.select_one('a')
+                    if journal_link:
+                        journal_title = journal_link.get_text(strip=True)
+                    
+                    # Try to extract volume, issue, pages from text after journal title
+                    journal_info = journal_cell.get_text(strip=True)
+                    
+                    # Extract volume
+                    vol_match = re.search(r'Volume:\s*(\d+)', journal_info) or re.search(r'Volume[^,]*?(\d+)', journal_info)
+                    if vol_match:
+                        volume = vol_match.group(1)
+                    
+                    # Extract issue
+                    issue_match = re.search(r'Issue:\s*(\d+)', journal_info) or re.search(r'Issue[^,]*?(\d+)', journal_info)
+                    if issue_match:
+                        issue = issue_match.group(1)
+                    
+                    # Extract pages
+                    pages_match = re.search(r'Pages:\s*([0-9-]+)', journal_info) or re.search(r'Pages[^,]*?([0-9-]+)', journal_info)
+                    if pages_match:
+                        pages = pages_match.group(1)
+                    
+                    # If we still don't have all the info, try another approach with more flexible regex
+                    if not (volume and issue and pages):
+                        parts = re.search(r'Year:\s*([\d]{4})(?:[^,]*?)(?:Volume:\s*(\d+))?(?:[^,]*?)(?:Issue:\s*(\d+))?(?:[^,]*?)(?:Pages:\s*([0-9-]+))?', journal_info)
+                        if parts:
+                            if not year and parts.group(1):
+                                year = parts.group(1)
+                            if not volume and parts.group(2):
+                                volume = parts.group(2)
+                            if not issue and parts.group(3):
+                                issue = parts.group(3)
+                            if not pages and parts.group(4):
+                                pages = parts.group(4)
+            
+            # Extract abstract/summary
+            abstract = None
+            summary_row = soup.select_one('.description-tab table.table-striped tr th:-soup-contains("Summary:")')
+            if summary_row:
+                summary_cell = summary_row.find_next_sibling('td')
+                if summary_cell:
+                    abstract = summary_cell.get_text(strip=True)
+            
+            # Extract URLs (if any)
+            urls = []
+            url_row = soup.select_one('table.table-striped tr th:-soup-contains("Online Access:")')
+            if url_row:
+                url_cell = url_row.find_next_sibling('td')
+                if url_cell:
+                    for link in url_cell.select('a.fulltext'):
+                        href = link.get('href')
+                        if href and href.startswith('http'):
+                            urls.append(href)
+            
+            # Create BiblioRecord with all extracted data
             record = BiblioRecord(
                 id=record_id,
                 title=title,
@@ -587,15 +697,30 @@ class IxTheoClient:
                 place_of_publication=pub_place,
                 isbn=isbn,
                 issn=issn,
-                subjects=subjects,
+                urls=urls,
                 abstract=abstract,
+                language=language,
+                format=format_str,
+                subjects=subjects,
+                series=series,
+                extent=extent,
+                journal_title=journal_title,
+                volume=volume,
+                issue=issue,
+                pages=pages,
                 raw_data=response.text
             )
             
+            self._debug_print(f"Created detailed record: {record.title}")
             return record
             
         except requests.exceptions.RequestException as e:
             logger.error(f"Record detail request error for record {record_id}: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Error parsing record details for {record_id}: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     def _debug_print(self, message):
@@ -930,7 +1055,203 @@ class IxTheoSearchHandler:
             filter_language=language_filter
         )
     
-    def get_record_with_export(self, record, export_format=None):
+    def get_record_with_marc(self, record):
+        """
+        Get a record with MARC export data
+        
+        Args:
+            record: The BiblioRecord to enhance
+            
+        Returns:
+            Enhanced BiblioRecord with complete metadata from MARC
+        """
+        if not record.id:
+            logger.debug(f"Record has no ID, returning unmodified")
+            return record
+        
+        # Get MARC export data
+        logger.debug(f"Getting MARC export for record: {record.id}")
+        marc_data = self.client.get_export_data(record.id, "MARC")
+        
+        # Debug output for MARC data
+        if marc_data:
+            logger.debug(f"MARC data received for {record.id}:")
+            logger.debug(marc_data)
+        else:
+            logger.debug(f"No MARC data received for {record.id}")
+            # If no MARC data, fallback to RIS
+            logger.warning(f"MARC retrieval failed for record {record.id}, falling back to RIS")
+            return self.get_record_with_ris(record)
+        
+        # Parse MARC data to extract key fields
+        title = None
+        authors = []
+        year = None
+        publisher = None
+        place = None
+        isbn = None
+        issn = None
+        journal = None
+        volume = None
+        issue = None
+        pages = None
+        series = None
+        language = None
+        subjects = []
+        abstract = None
+        format_str = None
+        
+        # Basic MARC parsing - this is a simplified version
+        # A more robust implementation would use the pymarc library
+        try:
+            # Look for title in 245 field
+            title_match = re.search(r'=245\s+\d\d\s+\$a([^$]+)', marc_data)
+            if title_match:
+                title = title_match.group(1).strip()
+                # Check for subtitle in $b
+                subtitle_match = re.search(r'=245\s+\d\d\s+\$a[^$]+\$b([^$]+)', marc_data)
+                if subtitle_match:
+                    title += ': ' + subtitle_match.group(1).strip()
+            
+            # Look for authors in 100 and 700 fields
+            author_matches = re.finditer(r'=(?:100|700)\s+\d\d\s+\$a([^$]+)', marc_data)
+            for match in author_matches:
+                author = match.group(1).strip()
+                # Clean up author name
+                author = re.sub(r',\s*\d{4}-', ',', author)  # Remove birth dates
+                authors.append(author)
+            
+            # Look for publication info in 264 field
+            pub_match = re.search(r'=264\s+\d\d\s+\$a([^$]+)\$b([^$]+)\$c([^$]+)', marc_data)
+            if pub_match:
+                place = pub_match.group(1).strip()
+                publisher = pub_match.group(2).strip()
+                pub_date = pub_match.group(3).strip()
+                # Extract year from publication date
+                year_match = re.search(r'(\d{4})', pub_date)
+                if year_match:
+                    year = year_match.group(1)
+            
+            # Look for ISBN in 020 field
+            isbn_match = re.search(r'=020\s+\d\d\s+\$a([^$]+)', marc_data)
+            if isbn_match:
+                isbn = isbn_match.group(1).strip()
+                # Clean up ISBN
+                isbn = re.sub(r'\s*\(.+?\)', '', isbn)  # Remove qualifiers in parentheses
+            
+            # Look for ISSN in 022 field
+            issn_match = re.search(r'=022\s+\d\d\s+\$a([^$]+)', marc_data)
+            if issn_match:
+                issn = issn_match.group(1).strip()
+            
+            # Look for series in 490 field
+            series_match = re.search(r'=490\s+\d\d\s+\$a([^$]+)', marc_data)
+            if series_match:
+                series = series_match.group(1).strip()
+            
+            # Look for language in 041 field
+            lang_match = re.search(r'=041\s+\d\d\s+\$a([^$]+)', marc_data)
+            if lang_match:
+                language_code = lang_match.group(1).strip()
+                # Map language code to name if needed
+                language_map = {
+                    'eng': 'English',
+                    'ger': 'German',
+                    'fre': 'French',
+                    'spa': 'Spanish',
+                    'ita': 'Italian'
+                    # Add more as needed
+                }
+                language = language_map.get(language_code, language_code)
+            
+            # Look for subjects in 650 fields
+            subject_matches = re.finditer(r'=650\s+\d\d\s+\$a([^$]+)', marc_data)
+            for match in subject_matches:
+                subject = match.group(1).strip()
+                subjects.append(subject)
+            
+            # Look for abstract in 520 field
+            abstract_match = re.search(r'=520\s+\d\d\s+\$a([^$]+)', marc_data)
+            if abstract_match:
+                abstract = abstract_match.group(1).strip()
+            
+            # Determine format from leader
+            leader_match = re.search(r'=LDR\s+(\d{24})', marc_data)
+            if leader_match:
+                leader = leader_match.group(1)
+                type_code = leader[6] if len(leader) > 6 else '?'
+                if type_code == 'a':
+                    format_str = "Book"
+                elif type_code == 's':
+                    format_str = "Serial"
+                elif type_code == 'm':
+                    format_str = "Computer File"
+                else:
+                    format_str = "Unknown"
+            
+            # For journal articles, try to extract journal info
+            if format_str == "Serial" or issn:
+                # Look for journal title in 773 field (host item entry)
+                journal_match = re.search(r'=773\s+\d\d\s+\$t([^$]+)', marc_data)
+                if journal_match:
+                    journal = journal_match.group(1).strip()
+                    
+                    # Look for volume
+                    volume_match = re.search(r'=773\s+\d\d\s+.*\$g.*?(\d+)', marc_data)
+                    if volume_match:
+                        volume = volume_match.group(1)
+                    
+                    # Look for issue
+                    issue_match = re.search(r'=773\s+\d\d\s+.*\$g.*?no\.\s*(\d+)', marc_data)
+                    if issue_match:
+                        issue = issue_match.group(1)
+                    
+                    # Look for pages
+                    pages_match = re.search(r'=773\s+\d\d\s+.*\$g.*?p\.\s*(\d+(?:-\d+)?)', marc_data)
+                    if pages_match:
+                        pages = pages_match.group(1)
+        
+        except Exception as e:
+            logger.error(f"Error parsing MARC data for record {record.id}: {e}")
+            # Fallback to RIS if MARC parsing fails
+            logger.warning(f"MARC parsing failed for record {record.id}, falling back to RIS")
+            return self.get_record_with_ris(record)
+        
+        # Create a new record with data from MARC
+        enhanced_record = BiblioRecord(
+            id=record.id,
+            title=title or record.title or "Unknown Title",
+            authors=authors or record.authors or [],
+            year=year or record.year,
+            publisher_name=publisher or record.publisher_name,
+            place_of_publication=place or record.place_of_publication,
+            isbn=isbn or record.isbn,
+            issn=issn or record.issn,
+            
+            # For journal articles
+            journal_title=journal,
+            volume=volume,
+            issue=issue,
+            pages=pages,
+            
+            # For books
+            series=series,
+            
+            # Store MARC data for reference
+            raw_data=marc_data,
+            
+            subjects=subjects or record.subjects or [],
+            abstract=abstract or record.abstract,
+            language=language or record.language,
+            
+            # Store record format
+            format=format_str or record.format
+        )
+        
+        logger.debug(f"Enhanced record created from MARC for {record.id}: {enhanced_record}")
+        return enhanced_record
+    
+    def get_record_with_ris(self, record):
         """
         Get a record with export data
         
@@ -947,7 +1268,7 @@ class IxTheoSearchHandler:
         
         # First get detailed record information
         logger.debug(f"Getting detail for record: {record.id}")
-        detailed_record = self.client.get_detailed_record(record.id)
+        detailed_record = self.client.get_record_with_html(record.id)
         
         # Get RIS export data - IxTheo only supports RIS and MARC directly
         logger.debug(f"Getting RIS export for record: {record.id}")
@@ -1162,13 +1483,19 @@ class IxTheoSearchHandler:
 
 # Define IxTheo endpoint information
 IXTHEO_ENDPOINTS = {
-    'ixtheo': {
-        'name': 'Index Theologicus (IxTheo)',
-        'url': 'https://ixtheo.de',
-        'description': 'Specialized theological bibliography',
-        'formats': ['Article', 'Book', 'Journal', 'Dissertation'],
-        'languages': ['German', 'English', 'French', 'Italian', 'Spanish'],
-        'export_formats': ['RIS', 'MARC'],
-        'subjects': []
+    "ris": {
+        "name": "Index Theologicus (IxTheo) - RIS format",
+        "base_url": "https://ixtheo.de",
+        "format": "ris"
+    },
+    "marc": {
+        "name": "Index Theologicus (IxTheo) - MARC format",
+        "base_url": "https://ixtheo.de",
+        "format": "marc"
+    },
+    "html": {
+        "name": "Index Theologicus (IxTheo) - HTML parsing",
+        "base_url": "https://ixtheo.de",
+        "format": "html"
     }
 }
