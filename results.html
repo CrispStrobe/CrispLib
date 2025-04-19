@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Library Search Results</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        h1 {
+            color: #2c3e50;
+            margin-bottom: 30px;
+        }
+        .record {
+            background-color: #f9f9f9;
+            border-left: 4px solid #2196F3;
+            padding: 15px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        .record h2 {
+            margin-top: 0;
+            color: #2c3e50;
+        }
+        .field {
+            margin-bottom: 8px;
+        }
+        .field-name {
+            font-weight: bold;
+            color: #555;
+        }
+        .tag {
+            display: inline-block;
+            background: #e1f5fe;
+            color: #0277bd;
+            padding: 2px 8px;
+            margin-right: 5px;
+            margin-bottom: 5px;
+            border-radius: 3px;
+            font-size: 0.9em;
+        }
+        #importButton {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            padding: 10px 15px;
+            background: #2196F3;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            z-index: 100;
+        }
+        #importButton:hover {
+            background: #0b7dda;
+        }
+        #notification {
+            display: none;
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(60, 60, 60, 0.9);
+            color: white;
+            padding: 20px;
+            border-radius: 5px;
+            text-align: center;
+            z-index: 1000;
+        }
+        .ok-button {
+            margin-top: 10px;
+            padding: 5px 20px;
+            background: #2196F3;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+    <h1>Library Search Results (<span id="recordCount">2 records</span>)</h1>
+    <button id="importButton">Import to Zotero</button>
+    
+    <div id="notification">
+        <div id="notificationMessage"></div>
+        <button class="ok-button" onclick="document.getElementById('notification').style.display='none'">OK</button>
+    </div>
+    
+    <div id="records">
+
+        <div class="record" data-record-index="0">
+            <h2>Performanz und Diskurs</h2>
+            
+            <div class="field">
+                <span class="field-name">Authors:</span> Christian Ströbele
+            </div>
+
+            <div class="field">
+                <span class="field-name">Year:</span> 2015
+            </div>
+
+            <div class="field">
+                <span class="field-name">Publisher:</span> Aschendorff Verlag
+            </div>
+
+            <div class="field">
+                <span class="field-name">Place:</span> Münster
+            </div>
+
+            <div class="field">
+                <span class="field-name">ISBN:</span> 9783402159989
+            </div>
+
+            <div class="field">
+                <span class="field-name">Language:</span> ger
+            </div>
+
+            <div class="field">
+                <span class="field-name">Abstract:</span> Religiöse Sprache und negative Theologie bei Cusanus
+            </div>
+
+            <div class="field">
+                <span class="field-name">Subjects:</span><br>
+
+                <span class="tag">118588095</span>
+
+                <span class="tag">4049386-6</span>
+
+                <span class="tag">4041553-3</span>
+
+                <span class="tag">4185082-8</span>
+
+                <span class="tag">Q</span>
+
+                <span class="tag">230</span>
+
+                <span class="tag">100</span>
+
+            </div>
+
+        </div>
+
+        <div class="record" data-record-index="1">
+            <h2>Kasuistik zwischen Performanz und Diskurs</h2>
+            
+            <div class="field">
+                <span class="field-name">Authors:</span> Eike Wolf
+            </div>
+
+            <div class="field">
+                <span class="field-name">Year:</span> 2020
+            </div>
+
+            <div class="field">
+                <span class="field-name">Language:</span> ger
+            </div>
+
+            <div class="field">
+                <span class="field-name">URLs:</span>
+
+                <a href="https://www.pflb-journal.de/index.php/pflb/article/view/3612/3705" target="_blank">https://www.pflb-journal.de/index.php/pflb/article/view/3612/3705</a><br>
+
+                <a href="https://doi.org/10.4119/pflb-3612" target="_blank">https://doi.org/10.4119/pflb-3612</a><br>
+
+                <a href="https://nbn-resolving.org/urn:nbn:de:101:1-2020082619311408835504" target="_blank">https://nbn-resolving.org/urn:nbn:de:101:1-2020082619311408835504</a><br>
+
+            </div>
+
+            <div class="field">
+                <span class="field-name">Abstract:</span> Dimensionen der hochschuldidaktischen Fallauswahl für Fallrekonstruktionen im Seminarrahmen
+            </div>
+
+        </div>
+
+    </div>
+    
+    <script>
+        // Store records data
+        const risData = `TY  - BOOK\r\nID  - 1\r\nTI  - Performanz und Diskurs\r\nAU  - Christian Ströbele\r\nPY  - 2015\r\nY1  - 2015///\r\nPB  - Aschendorff Verlag\r\nCY  - Münster\r\nSN  - 9783402159989\r\nLA  - ger\r\nAB  - Religiöse Sprache und negative Theologie bei Cusanus\r\nKW  - 118588095\r\nKW  - 4049386-6\r\nKW  - 4041553-3\r\nKW  - 4185082-8\r\nKW  - Q\r\nKW  - 230\r\nKW  - 100\r\nER  - \r\n\r\nTY  - BOOK\r\nID  - 2\r\nTI  - Kasuistik zwischen Performanz und Diskurs\r\nAU  - Eike Wolf\r\nPY  - 2020\r\nY1  - 2020///\r\nLA  - ger\r\nUR  - https://www.pflb-journal.de/index.php/pflb/article/view/3612/3705\r\nUR  - https://doi.org/10.4119/pflb-3612\r\nUR  - https://nbn-resolving.org/urn:nbn:de:101:1-2020082619311408835504\r\nAB  - Dimensionen der hochschuldidaktischen Fallauswahl für Fallrekonstruktionen im Seminarrahmen\r\nER  - \r\n\r\n`;
+        
+        // Check for Zotero Connector
+        let zoteroConnector = false;
+        if (typeof Zotero !== 'undefined') {
+            zoteroConnector = true;
+            document.getElementById('importButton').textContent = 'Import to Zotero (Connector Found)';
+        }
+        
+        // Handle button click
+        document.getElementById('importButton').addEventListener('click', function() {
+            if (zoteroConnector) {
+                try {
+                    // Try to use Zotero Connector
+                    Zotero.ModalPrompt.show('Library Search Results', 
+                        'Preparing to import items to Zotero...');
+                    
+                    // We'll try to use the Zotero Connector's built-in RIS importer
+                    Zotero.Utilities.Internal.RIS.doImport(risData)
+                        .then(function(result) {
+                            Zotero.ModalPrompt.show('Import Successful', 
+                                'Successfully imported items to Zotero.');
+                        })
+                        .catch(function(error) {
+                            // If the direct import method fails, fall back to downloaded RIS
+                            showNotification('Zotero Connector not found. Downloaded results as RIS file that can be imported manually into Zotero.');
+                            downloadRIS();
+                        });
+                } catch (e) {
+                    // If any error occurs, fall back to downloading RIS
+                    showNotification('Zotero Connector not found. Downloaded results as RIS file that can be imported manually into Zotero.');
+                    downloadRIS();
+                }
+            } else {
+                // No Zotero connector found - download RIS
+                showNotification('Zotero Connector not found. Downloaded results as RIS file that can be imported manually into Zotero.');
+                downloadRIS();
+            }
+        });
+        
+        // Function to download RIS file
+        function downloadRIS() {
+            const blob = new Blob([risData], {type: 'application/x-research-info-systems'});
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'library_search_results.ris';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+        
+        // Function to show notification
+        function showNotification(message) {
+            document.getElementById('notificationMessage').textContent = message;
+            document.getElementById('notification').style.display = 'block';
+        }
+    </script>
+</body>
+</html>

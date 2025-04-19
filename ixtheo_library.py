@@ -1280,6 +1280,41 @@ class IxTheoSearchHandler:
             logger.debug(ris_data)
         else:
             logger.debug(f"No RIS data received for {record.id}")
+            
+            # If we have a detailed record but no RIS data
+            if detailed_record:
+                logger.debug(f"Using detailed record (no RIS data) for {record.id}")
+                detailed_record.raw_data = detailed_record.raw_data or record.raw_data
+                return detailed_record
+            
+            # If all else fails, return the original record
+            logger.debug(f"No enhanced data available, returning original record for {record.id}")
+            return record
+        
+        # Ensure RIS data is properly encoded as UTF-8
+        if isinstance(ris_data, bytes):
+            try:
+                ris_data = ris_data.decode('utf-8')
+            except UnicodeDecodeError:
+                # Try different encodings if UTF-8 fails
+                try:
+                    ris_data = ris_data.decode('latin-1')
+                except UnicodeDecodeError:
+                    ris_data = ris_data.decode('utf-8', errors='replace')
+        
+        # Fix common umlaut encodings if they appear as escape sequences
+        umlaut_replacements = {
+            r'\u00fc': 'ü',
+            r'\u00e4': 'ä',
+            r'\u00f6': 'ö',
+            r'\u00dc': 'Ü',
+            r'\u00c4': 'Ä',
+            r'\u00d6': 'Ö',
+            r'\u00df': 'ß'
+        }
+        
+        for escape_seq, umlaut in umlaut_replacements.items():
+            ris_data = ris_data.replace(escape_seq, umlaut)
         
         # Extract data from RIS to populate record fields
         if ris_data:
@@ -1287,6 +1322,8 @@ class IxTheoSearchHandler:
             record_type = None
             title = None
             authors = []
+            editors = []
+            translators = []
             year = None
             publisher = None
             place = None
@@ -1300,8 +1337,8 @@ class IxTheoSearchHandler:
             language = None
             doi = None
             series_title = None
-            series_editor = None
-            editors = []
+            urls = []
+            abstract = None
             
             # Simple RIS parser
             for line in ris_data.splitlines():
@@ -1314,18 +1351,26 @@ class IxTheoSearchHandler:
                     continue
                     
                 tag, value = parts[0].strip(), parts[1].strip()
+                # Ensure the value is properly encoded
+                value = self._ensure_utf8(value)
                 logger.debug(f"Processing RIS tag: {tag} with value: {value}")
                 
                 if tag == "TY":  # Type
                     record_type = value
                     logger.debug(f"Record type set to: {record_type}")
-                elif tag == "TI" or tag == "T1":  # Title
+                elif tag in ["TI", "T1"]:  # Title
                     title = value
                     logger.debug(f"Title set to: {title}")
-                elif tag == "AU":  # Author
+                elif tag == "AU" or tag == "A1":  # Author
                     authors.append(value)
                     logger.debug(f"Added author: {value}")
-                elif tag == "PY" or tag == "Y1":  # Year
+                elif tag == "A2" or tag == "ED":  # Editor
+                    editors.append(value)
+                    logger.debug(f"Added editor: {value}")
+                elif tag == "A4":  # Translator
+                    translators.append(value)
+                    logger.debug(f"Added translator: {value}")
+                elif tag in ["PY", "Y1"]:  # Year
                     year_match = re.search(r'(\d{4})', value)
                     if year_match:
                         year = year_match.group(1)
@@ -1343,35 +1388,40 @@ class IxTheoSearchHandler:
                     else:
                         isbn = value
                         logger.debug(f"ISBN set to: {isbn}")
-                elif tag == "T2":  # Secondary Title - contains series/journal info
+                elif tag in ["T2", "JF", "JO", "JA"]:  # Secondary Title/Journal
                     if record_type == "JOUR":
                         journal = value
                         logger.debug(f"Journal title set to: {value}")
                     else:
-                        # For book chapters, T2 often contains the book title and editors
-                        series_title = value
-                        logger.debug(f"Series/Book title set to: {value}")
-                        
-                        # If we found editors in ED tags, use those, otherwise try to extract from series title
-                        if not editors and series_title:
-                            # Try to extract editor information from the series title
-                            editor_match = re.search(r'(.+?),\s+(.+?)(?:\s+\d{4}-)?\s+\(edt\)', series_title)
-                            if editor_match:
-                                # Extract editor name and clean up
-                                series_editor = editor_match.groups()[0] + ', ' + editor_match.groups()[1]
-                                # Remove birth dates
-                                series_editor = re.sub(r'\s+\d{4}-(?:\d{4})?', '', series_editor)
-                                editors.append(series_editor)
-                                logger.debug(f"Extracted series editor: {series_editor}")
+                        # Process book chapter information from T2
+                        # First, extract editors from T2 field if present
+                        if tag == "T2":
+                            # Look for patterns like "Author Name (edt)"
+                            t2_value = value
+                            editor_matches = re.finditer(r'([^,]+)(?:,\s+([^(]+))?\s+(?:\d{4}-)?\s*\(edt\)', t2_value)
+                            for editor_match in editor_matches:
+                                if editor_match.group(2):  # We have last name, first name
+                                    editor_name = f"{editor_match.group(1).strip()}, {editor_match.group(2).strip()}"
+                                else:  # Just have a name
+                                    editor_name = editor_match.group(1).strip()
                                 
-                                # Extract just the book title
-                                book_title_match = re.search(r'\(edt\),\s+(.+)', series_title)
-                                if book_title_match:
-                                    series_title = book_title_match.groups()[0].strip()
-                                    logger.debug(f"Cleaned series title: {series_title}")
-                elif tag == "JO":  # Journal
-                    journal = value
-                    logger.debug(f"Journal title set to: {value}")
+                                # Remove birth dates if present
+                                editor_name = re.sub(r'\s+\d{4}-(?:\d{4})?', '', editor_name)
+                                
+                                if editor_name not in editors:
+                                    editors.append(editor_name)
+                                    logger.debug(f"Extracted editor from T2: {editor_name}")
+                            
+                            # Now remove the editor information from the T2 field to get just the book title
+                            clean_series_title = re.sub(r'([^,]+)(?:,\s+[^(]+)?\s+(?:\d{4}-)?\s*\(edt\),\s*', '', t2_value)
+                            # Remove any trailing comma + space if it's at the beginning
+                            clean_series_title = re.sub(r'^,\s*', '', clean_series_title)
+                            series_title = clean_series_title
+                            logger.debug(f"Series/Book title (cleaned) set to: {series_title}")
+                        else:
+                            # For other secondary title fields, just use as is
+                            series_title = value
+                            logger.debug(f"Series/Book title set to: {value}")
                 elif tag == "VL":  # Volume
                     volume = value
                     logger.debug(f"Volume set to: {volume}")
@@ -1390,12 +1440,14 @@ class IxTheoSearchHandler:
                 elif tag == "DO":  # DOI
                     doi = value
                     logger.debug(f"DOI set to: {doi}")
-                elif tag == "ED":  # Editor
-                    editors.append(value)
-                    logger.debug(f"Added editor: {value}")
-
+                elif tag == "UR":  # URL
+                    urls.append(value)
+                    logger.debug(f"Added URL: {value}")
+                elif tag == "N2" or tag == "AB":  # Abstract
+                    abstract = value
+                    logger.debug(f"Abstract set to: {abstract}")
             
-            # Create page range if we have both start and end pages
+            # Create page range without "Pages " prefix
             pages = None
             if start_page and end_page:
                 pages = f"{start_page}-{end_page}"
@@ -1412,37 +1464,45 @@ class IxTheoSearchHandler:
                 format_str = "Book"
             elif record_type == "CHAP":
                 format_str = "Book Chapter"
+            elif record_type == "THES":
+                format_str = "Thesis"
+            elif record_type == "CONF":
+                format_str = "Conference Paper"
+            elif record_type == "RPRT":
+                format_str = "Report"
             
             # Create a new record with data from both RIS and detailed record
             enhanced_record = BiblioRecord(
                 id=record.id,
                 title=title or (detailed_record.title if detailed_record else record.title) or "Unknown Title",
                 authors=authors or (detailed_record.authors if detailed_record else record.authors) or [],
-                # editors=[series_editor] if series_editor else [],  # Add editors field
-                # editors=editors or (detailed_record.editors if detailed_record else []),
+                editors=editors or (detailed_record.editors if detailed_record else []),
+                translators=translators or [],
                 year=year or (detailed_record.year if detailed_record else record.year),
                 publisher_name=publisher or (detailed_record.publisher_name if detailed_record else None),
                 place_of_publication=place or (detailed_record.place_of_publication if detailed_record else None),
                 isbn=isbn or (detailed_record.isbn if detailed_record else None),
                 issn=issn or (detailed_record.issn if detailed_record else None),
+                urls=urls or [],
                 
                 # For journal articles
                 journal_title=journal if record_type == "JOUR" else None,
                 volume=volume,
                 issue=issue,
+                pages=pages,
                 
                 # For book chapters, store book title in series field
                 series=series_title,
                 
-                # Store in raw_data only if we don't have a dedicated editors field
                 raw_data=ris_data,
                 
-                # Store page range in extent for consistency
-                extent=f"Pages {pages}" if pages else None,
+                # Create proper extent field without "Pages " prefix
+                extent=pages if pages else None,
                 
                 subjects=detailed_record.subjects if detailed_record and detailed_record.subjects else [],
-                abstract=detailed_record.abstract if detailed_record and detailed_record.abstract else None,
+                abstract=abstract or (detailed_record.abstract if detailed_record and detailed_record.abstract else None),
                 language=language,
+                doi=doi,
                 
                 # Store record type to inform downstream formatting
                 format=format_str if format_str else (record_type if record_type else None)
@@ -1455,6 +1515,7 @@ class IxTheoSearchHandler:
             logger.debug(f"  Title: {enhanced_record.title}")
             logger.debug(f"  Authors: {enhanced_record.authors}")
             logger.debug(f"  Editors: {enhanced_record.editors}")
+            logger.debug(f"  Translators: {enhanced_record.translators}")
             logger.debug(f"  Year: {enhanced_record.year}")
             logger.debug(f"  Format/Type: {enhanced_record.format}")
             logger.debug(f"  Publisher: {enhanced_record.publisher_name}")
@@ -1463,23 +1524,54 @@ class IxTheoSearchHandler:
             logger.debug(f"  ISSN: {enhanced_record.issn}")
             logger.debug(f"  Journal: {enhanced_record.journal_title}")
             logger.debug(f"  Series/Book title: {enhanced_record.series}")
-            logger.debug(f"  Series/Book editor: {series_editor}")
+            logger.debug(f"  URLs: {enhanced_record.urls}")
             logger.debug(f"  Volume: {enhanced_record.volume}")
             logger.debug(f"  Issue: {enhanced_record.issue}")
-            logger.debug(f"  Extent: {enhanced_record.extent}")
+            logger.debug(f"  Pages: {enhanced_record.pages}")
+            logger.debug(f"  DOI: {enhanced_record.doi}")
             
             return enhanced_record
-        
-        # If we have a detailed record but no RIS data
-        if detailed_record:
-            logger.debug(f"Using detailed record (no RIS data) for {record.id}")
-            detailed_record.raw_data = detailed_record.raw_data or record.raw_data
-            return detailed_record
-        
-        # If all else fails, return the original record
-        logger.debug(f"No enhanced data available, returning original record for {record.id}")
-        return record
 
+    def _ensure_utf8(self, text):
+        """
+        Ensure that text is properly encoded as UTF-8, specifically handling umlauts
+        
+        Args:
+            text: The text to ensure is UTF-8 encoded
+            
+        Returns:
+            UTF-8 encoded text with proper handling of umlauts
+        """
+        if not text:
+            return text
+            
+        # Handle specific umlaut escape sequences
+        escape_chars = {
+            r'\u00fc': 'ü',
+            r'\u00e4': 'ä',
+            r'\u00f6': 'ö',
+            r'\u00dc': 'Ü',
+            r'\u00c4': 'Ä',
+            r'\u00d6': 'Ö',
+            r'\u00df': 'ß',
+            # Add additional special characters as needed
+        }
+        
+        for escape_seq, char in escape_chars.items():
+            text = text.replace(escape_seq, char)
+        
+        # Handle unicode escape sequences like \uXXXX
+        # This regex finds patterns like \uXXXX where X is a hexadecimal digit
+        def replace_unicode_escapes(match):
+            try:
+                # Convert the 4-digit hex code to an integer and then to a character
+                return chr(int(match.group(1), 16))
+            except:
+                return match.group(0)  # Return the original match if conversion fails
+        
+        text = re.sub(r'\\u([0-9a-fA-F]{4})', replace_unicode_escapes, text)
+        
+        return text
 
 # Define IxTheo endpoint information
 IXTHEO_ENDPOINTS = {
