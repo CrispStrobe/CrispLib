@@ -987,7 +987,8 @@ def search_sru_endpoint(args):
         base_url=endpoint_info['url'],
         default_schema=endpoint_info.get('default_schema'),
         version=endpoint_info.get('version', '1.1'),
-        timeout=args.timeout
+        timeout=args.timeout,
+        query_params=endpoint_info.get('query_params'),
     )
     
     logger.info(f"Searching with SRU query: {query}")

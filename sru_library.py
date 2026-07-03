@@ -8,12 +8,21 @@ without requiring hardcoded classes for each specific library.
 """
 
 import requests
-import xml.etree.ElementTree as ET
+# Prefer defusedxml to harden against XXE / billion-laughs / quadratic-blowup
+# attacks when parsing untrusted SRU/OAI responses. Fall back to stdlib
+# ElementTree only if defusedxml is not installed.
+# defusedxml hardens the parsing functions; element types still come from stdlib.
+import xml.etree.ElementTree as _stdlib_ET  # nosec B405 
+try:
+    import defusedxml.ElementTree as ET  # type: ignore[import-not-found]
+    # defusedxml only wraps parsers; re-export Element from stdlib for type hints.
+    ET.Element = _stdlib_ET.Element  # type: ignore[attr-defined]
+except ImportError:  # pragma: no cover
+    ET = _stdlib_ET  # nosec B405 
 import urllib.parse
 import logging
-import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Any, Optional, Union, Tuple, Callable, Set
+from typing import Dict, List, Any, Optional, Tuple, Callable
 import re
 
 # Configure logging
@@ -210,7 +219,7 @@ class SRUClient:
     """
     
     # Registry of record format parsers
-    parsers = {}
+    parsers: Dict[str, Callable] = {}
     
     @classmethod
     def register_parser(cls, schema_name):
@@ -220,14 +229,14 @@ class SRUClient:
             return parser_func
         return decorator
     
-    def __init__(self, 
+    def __init__(self,
                 base_url: str,
-                default_schema: str = None,
+                default_schema: Optional[str] = None,
                 version: str = "1.1",
-                namespaces: Dict[str, str] = None,
-                timeout: int = 30, 
+                namespaces: Optional[Dict[str, str]] = None,
+                timeout: int = 30,
                 record_parser: Optional[Callable] = None,
-                query_params: Dict[str, str] = None):
+                query_params: Optional[Dict[str, str]] = None):
         """
         Initialize SRU client.
         """
@@ -309,8 +318,8 @@ class SRUClient:
         if namespaces:
             self.namespaces.update(namespaces)
     
-    def build_query_url(self, query: str, 
-                        schema: str = None,
+    def build_query_url(self, query: str,
+                        schema: Optional[str] = None,
                         max_records: int = 10,
                         start_record: int = 1) -> str:
         """
@@ -351,9 +360,9 @@ class SRUClient:
         else:
             return f"{self.base_url}?{param_string}"
     
-    def execute_query(self, query: str, 
-                    schema: str = None,
-                    max_records: int = 10, 
+    def execute_query(self, query: str,
+                    schema: Optional[str] = None,
+                    max_records: int = 10,
                     start_record: int = 1) -> Tuple[int, List[Dict[str, Any]]]:
         """
         Execute SRU query and return raw results.
@@ -375,7 +384,7 @@ class SRUClient:
             response.raise_for_status()
             
             # Parse XML response
-            root = ET.fromstring(response.content)
+            root = ET.fromstring(response.content)  # nosec B314 
             
             # Check for diagnostics (errors)
             namespaces = {
@@ -389,8 +398,8 @@ class SRUClient:
                 for diag in bnf_diagnostics:
                     message_elem = diag.find('./sd:message', namespaces)
                     details_elem = diag.find('./sd:details', namespaces)
-                    uri_elem = diag.find('./sd:uri', namespaces)
-                    
+
+
                     # Log details if available
                     if message_elem is not None and message_elem.text:
                         logger.warning(f"SRU Diagnostic: {message_elem.text}")
@@ -404,7 +413,7 @@ class SRUClient:
                                 logger.info(f"Retrying with corrected URL: {corrected_url}")
                                 response = requests.get(corrected_url, timeout=self.timeout)
                                 response.raise_for_status()
-                                root = ET.fromstring(response.content)
+                                root = ET.fromstring(response.content)  # nosec B314 
             
             # Check standard SRU diagnostics
             diagnostics = root.findall('.//srw:diagnostics/sd:diagnostic', namespaces)
@@ -428,7 +437,7 @@ class SRUClient:
                 return 0, []
             
             try:
-                num_records = int(num_records_elem.text)
+                num_records = int(num_records_elem.text or "0")
                 logger.debug(f"Found {num_records} records")
             except (ValueError, TypeError):
                 logger.warning(f"Invalid number of records: {num_records_elem.text}")
@@ -438,7 +447,7 @@ class SRUClient:
                 return 0, []
             
             # Extract records
-            records = []
+            records: List[Dict[str, Any]] = []
             record_elems = root.findall('.//srw:record', namespaces)
             
             for record_elem in record_elems:
@@ -479,9 +488,9 @@ class SRUClient:
             logger.error(f"Unexpected error: {e}")
             return 0, []
     
-    def search(self, query: str, 
-            schema: str = None,
-            max_records: int = 10, 
+    def search(self, query: str,
+            schema: Optional[str] = None,
+            max_records: int = 10,
             start_record: int = 1) -> Tuple[int, List[BiblioRecord]]:
         """
         Search the SRU endpoint and parse records.
@@ -500,7 +509,7 @@ class SRUClient:
         if not raw_records:
             return total, []
         
-        records = []
+        records: List[BiblioRecord] = []
         existing_ids = set()  # Track existing record IDs to avoid duplicates
         
         for raw_record in raw_records:
@@ -613,17 +622,17 @@ class SRUClient:
                 if elem is not None and elem.text and elem.text.strip():
                     title = elem.text.strip()
                     break
-            except Exception:
+            except Exception:  # nosec B110,B112 
                 continue
         
         if not title:
             title = f"Untitled Record ({record_id})"
         
         # Try to find authors
-        authors = []
-        editors = []
-        translators = []
-        contributors = []
+        authors: List[str] = []
+        editors: List[str] = []
+        translators: List[str] = []
+        contributors: List[Dict[str, str]] = []
         
         # Extract creators/authors
         author_paths = [
@@ -677,7 +686,7 @@ class SRUClient:
                         if name not in seen_names:
                             authors.append(name)
                             seen_names.add(name)
-            except Exception:
+            except Exception:  # nosec B110,B112 
                 continue
         
         # Try to find year
@@ -705,7 +714,7 @@ class SRUClient:
                     if match:
                         year = match.group(1)
                         break
-            except Exception:
+            except Exception:  # nosec B110,B112 
                 continue
         
         # Try to find publisher
@@ -729,7 +738,7 @@ class SRUClient:
                     # Clean up publisher string (remove trailing punctuation)
                     publisher = re.sub(r'[,:]$', '', publisher).strip()
                     break
-            except Exception:
+            except Exception:  # nosec B110,B112 
                 continue
         
         # Try to find place of publication
@@ -749,7 +758,7 @@ class SRUClient:
                     # Clean up place (remove trailing punctuation)
                     place_of_publication = re.sub(r'[,:]$', '', place_of_publication).strip()
                     break
-            except Exception:
+            except Exception:  # nosec B110,B112 
                 continue
         
         # Try to find ISBN
@@ -778,7 +787,7 @@ class SRUClient:
                     else:
                         isbn = isbn_text
                         break
-            except Exception:
+            except Exception:  # nosec B110,B112 
                 continue
         
         # Try to find ISSN
@@ -804,7 +813,7 @@ class SRUClient:
                     else:
                         issn = issn_text
                         break
-            except Exception:
+            except Exception:  # nosec B110,B112 
                 continue
         
         # Try to find journal title (for articles)
@@ -822,7 +831,7 @@ class SRUClient:
                 if elem is not None and elem.text:
                     journal_title = elem.text.strip()
                     break
-            except Exception:
+            except Exception:  # nosec B110,B112 
                 continue
         
         # Try to find volume and issue
@@ -841,7 +850,7 @@ class SRUClient:
                 if elem is not None and elem.text:
                     volume = elem.text.strip()
                     break
-            except Exception:
+            except Exception:  # nosec B110,B112 
                 continue
         
         # Issue
@@ -856,7 +865,7 @@ class SRUClient:
                 if elem is not None and elem.text:
                     issue = elem.text.strip()
                     break
-            except Exception:
+            except Exception:  # nosec B110,B112 
                 continue
         
         # Try to find page range
@@ -879,7 +888,7 @@ class SRUClient:
                         # Just use raw text if no pattern matched
                         pages = page_text
                     break
-            except Exception:
+            except Exception:  # nosec B110,B112 
                 continue
         
         # Try to find extent (number of pages for books)
@@ -895,31 +904,26 @@ class SRUClient:
                 if elem is not None and elem.text:
                     extent = elem.text.strip()
                     break
-            except Exception:
+            except Exception:  # nosec B110,B112 
                 continue
         
         # Try to find DOI
         doi = None
-        doi_paths = [
-            './/dc:identifier[contains(text(), "doi")]',
-            './/marc:datafield[@tag="024"][@ind1="7"]/marc:subfield[@code="a"][../marc:subfield[@code="2"]="doi"]',
-            './/mxc:datafield[@tag="024"][@ind1="7"]/mxc:subfield[@code="a"][../mxc:subfield[@code="2"]="doi"]'
-        ]
-        
-        # Fixed implementation for finding DOI that doesn't use getparent()
+
+        # Implementation for finding DOI that doesn't use getparent()
         for path in ['.//marc:datafield[@tag="024"][@ind1="7"]', './/mxc:datafield[@tag="024"][@ind1="7"]']:
             try:
                 fields = record_data.findall(path, namespaces)
-                for field in fields:
-                    type_subfield = field.find('./marc:subfield[@code="2"]', namespaces) or field.find('./mxc:subfield[@code="2"]', namespaces)
-                    value_subfield = field.find('./marc:subfield[@code="a"]', namespaces) or field.find('./mxc:subfield[@code="a"]', namespaces)
+                for fld in fields:
+                    type_subfield = fld.find('./marc:subfield[@code="2"]', namespaces) or fld.find('./mxc:subfield[@code="2"]', namespaces)
+                    value_subfield = fld.find('./marc:subfield[@code="a"]', namespaces) or fld.find('./mxc:subfield[@code="a"]', namespaces)
                     
                     if (type_subfield is not None and type_subfield.text 
                             and type_subfield.text.strip().lower() == "doi" 
                             and value_subfield is not None and value_subfield.text):
                         doi = value_subfield.text.strip()
                         break
-            except Exception:
+            except Exception:  # nosec B110,B112 
                 continue
         
         # Try to find document type
@@ -932,7 +936,7 @@ class SRUClient:
                 leader_elem = record_data.find('.//mxc:leader', namespaces)
             if leader_elem is not None and leader_elem.text:
                 leader = leader_elem.text
-        except Exception:
+        except Exception:  # nosec
             pass
         
         if leader:
@@ -990,7 +994,7 @@ class SRUClient:
                     # Check for text content
                     elif elem.text and elem.text.strip().startswith('http'):
                         urls.append(elem.text.strip())
-            except Exception:
+            except Exception:  # nosec B110,B112 
                 continue
         
         # Try to find subjects
@@ -1012,7 +1016,7 @@ class SRUClient:
                 for elem in elems:
                     if elem.text and elem.text.strip():
                         subjects.append(elem.text.strip())
-            except Exception:
+            except Exception:  # nosec B110,B112 
                 continue
         
         # Try to find abstract/description
@@ -1030,7 +1034,7 @@ class SRUClient:
                 if elem is not None and elem.text:
                     abstract = elem.text.strip()
                     break
-            except Exception:
+            except Exception:  # nosec B110,B112 
                 continue
         
         # Try to find language
@@ -1048,7 +1052,7 @@ class SRUClient:
                 if elem is not None and elem.text:
                     language = elem.text.strip()
                     break
-            except Exception:
+            except Exception:  # nosec B110,B112 
                 continue
         
         # Try to find series
@@ -1066,7 +1070,7 @@ class SRUClient:
                 if elem is not None and elem.text:
                     series = elem.text.strip()
                     break
-            except Exception:
+            except Exception:  # nosec B110,B112 
                 continue
         
         # Try to find edition
@@ -1082,7 +1086,7 @@ class SRUClient:
                 if elem is not None and elem.text:
                     edition = elem.text.strip()
                     break
-            except Exception:
+            except Exception:  # nosec B110,B112 
                 continue
         
         # Create BiblioRecord with all extracted fields
@@ -1461,12 +1465,12 @@ def parse_marcxml(raw_record, namespaces):
     # Creator (100)
     for prefix in ['marc', 'mxc']:
         creator_fields = record.findall(f'.//{prefix}:datafield[@tag="100"]', ns)
-        for field in creator_fields:
-            name_subfield = field.find(f'./{prefix}:subfield[@code="a"]', ns)
+        for fld in creator_fields:
+            name_subfield = fld.find(f'./{prefix}:subfield[@code="a"]', ns)
             if name_subfield is not None and name_subfield.text:
                 name = name_subfield.text.strip()
                 # Check for role in subfield e
-                role_subfield = field.find(f'./{prefix}:subfield[@code="e"]', ns)
+                role_subfield = fld.find(f'./{prefix}:subfield[@code="e"]', ns)
                 role = role_subfield.text.strip().lower() if role_subfield is not None and role_subfield.text else ''
                 
                 if role:
@@ -1492,12 +1496,12 @@ def parse_marcxml(raw_record, namespaces):
     # Contributors (700)
     for prefix in ['marc', 'mxc']:
         contributor_fields = record.findall(f'.//{prefix}:datafield[@tag="700"]', ns)
-        for field in contributor_fields:
-            name_subfield = field.find(f'./{prefix}:subfield[@code="a"]', ns)
+        for fld in contributor_fields:
+            name_subfield = fld.find(f'./{prefix}:subfield[@code="a"]', ns)
             if name_subfield is not None and name_subfield.text:
                 name = name_subfield.text.strip()
                 # Check for role in subfield e
-                role_subfield = field.find(f'./{prefix}:subfield[@code="e"]', ns)
+                role_subfield = fld.find(f'./{prefix}:subfield[@code="e"]', ns)
                 role = role_subfield.text.strip().lower() if role_subfield is not None and role_subfield.text else ''
                 
                 if role:
@@ -1577,9 +1581,9 @@ def parse_marcxml(raw_record, namespaces):
     doi = None
     for prefix in ['marc', 'mxc']:
         doi_fields = record.findall(f'.//{prefix}:datafield[@tag="024" and @ind1="7"]', ns)
-        for field in doi_fields:
-            subfield_2 = field.find(f'./{prefix}:subfield[@code="2"]', ns)
-            subfield_a = field.find(f'./{prefix}:subfield[@code="a"]', ns)
+        for fld in doi_fields:
+            subfield_2 = fld.find(f'./{prefix}:subfield[@code="2"]', ns)
+            subfield_a = fld.find(f'./{prefix}:subfield[@code="a"]', ns)
             
             if (subfield_2 is not None and subfield_2.text and 
                 subfield_2.text.strip().lower() == "doi" and
@@ -1638,14 +1642,14 @@ def parse_marcxml(raw_record, namespaces):
     
     for prefix in ['marc', 'mxc']:
         host_item_fields = record.findall(f'.//{prefix}:datafield[@tag="773"]', ns)
-        for field in host_item_fields:
+        for fld in host_item_fields:
             # Title of host item (journal or book title)
-            title_subfield = field.find(f'./{prefix}:subfield[@code="t"]', ns)
+            title_subfield = fld.find(f'./{prefix}:subfield[@code="t"]', ns)
             if title_subfield is not None and title_subfield.text:
                 host_title = title_subfield.text.strip()
-                
+
                 # Check for journal by looking for volume info
-                g_subfield = field.find(f'./{prefix}:subfield[@code="g"]', ns)
+                g_subfield = fld.find(f'./{prefix}:subfield[@code="g"]', ns)
                 if g_subfield is not None and g_subfield.text:
                     vol_text = g_subfield.text.strip()
                     # Check if this looks like a journal reference
@@ -2682,51 +2686,74 @@ SRU_ENDPOINTS = {
     },
     'loc': {
         'name': 'Library of Congress',
-        'url': 'https://lccn.loc.gov/sru',
+        # Old lccn.loc.gov/sru is gone (404). Canonical SRU is the Z39.50-over-SRU
+        # gateway on port 210 (verify reachability; some networks block port 210).
+        'url': 'http://lx2.loc.gov:210/lcdb',
         'default_schema': 'marcxml',
-        'description': 'Library of Congress catalog',
+        'description': 'Library of Congress catalog (SRU gateway, port 210)',
         'version': '1.1',
         'examples': {
-            'title': 'title="Python"',
-            'author': 'author="Einstein"',
-            'isbn': 'isbn=9781234567890',
-            'advanced': 'title="Python" and author="Rossum"'
+            'title': 'bath.title=Python',
+            'author': 'bath.author=Einstein',
+            'isbn': 'bath.isbn=9781234567890',
+            'advanced': 'bath.title=Python and bath.author=Rossum'
         }
     },
-    
-    # Other libraries and collections
-    'trove': {
-        'name': 'Trove (National Library of Australia)',
-        'url': 'http://www.nla.gov.au/apps/srw/search/peopleaustralia',
-        'default_schema': 'dc',
-        'description': 'Australia\'s cultural collections',
-        'version': '1.1',
-        'examples': {
-            'name': 'bath.name="Smith"',
-            'advanced': 'pa.surname="Smith" and pa.firstname="John"'
-        }
-    },
+    # NOTE: Trove no longer offers open SRU (peopleaustralia is defunct/geo-blocked
+    # and was a people-search). Trove v3 is a REST API requiring a personal API key.
     'kb': {
         'name': 'KB - National Library of the Netherlands',
-        'url': 'http://jsru.kb.nl/sru',
+        # Correct path is /sru/sru; the GGC collection is selected via x-collection.
+        'url': 'http://jsru.kb.nl/sru/sru',
         'default_schema': 'dc',
-        'description': 'Dutch National Library',
-        'version': '1.1',
+        'description': 'Dutch National Library (GGC union catalogue)',
+        'version': '1.2',
+        'query_params': {'x-collection': 'GGC'},
         'examples': {
             'title': 'dc.title=Python',
+            'author': 'dc.creator=Einstein',
             'advanced': 'dc.title=Python and dc.date=2023'
         }
     },
     'bibsys': {
-        'name': 'BIBSYS - Norwegian Library Service',
-        'url': 'http://sru.bibsys.no/search/biblio',
-        'default_schema': 'dc',
-        'description': 'Norwegian academic libraries',
+        'name': 'BIBSYS - Norwegian Academic Libraries',
+        # sru.bibsys.no was decommissioned (migrated to Alma). Alma network-zone SRU.
+        'url': 'https://bibsys-network.alma.exlibrisgroup.com/view/sru/47BIBSYS_NETWORK',
+        'default_schema': 'marcxml',
+        'description': 'Norwegian academic libraries (BIBSYS/Alma network zone)',
+        'version': '1.2',
+        'examples': {
+            'title': 'alma.title=Python',
+            'author': 'alma.creator=Einstein',
+            'isbn': 'alma.isbn=9781234567890',
+            'advanced': 'alma.title=Python and alma.creator=Rossum'
+        }
+    },
+    'k10plus': {
+        'name': 'K10plus (GBV + SWB union catalogue)',
+        # Largest German union catalogue; covers most academic libraries. PICA indexes.
+        'url': 'https://sru.k10plus.de/opac-de-627',
+        'default_schema': 'marcxml',
+        'description': 'German union catalogue (GBV+SWB)',
         'version': '1.1',
         'examples': {
-            'title': 'title="Python"',
-            'author': 'author="Einstein"',
-            'advanced': 'title="Python" and date="2023"'
+            'title': 'pica.tit=Python',
+            'author': 'pica.per=Einstein',
+            'isbn': 'pica.isb=9783658310844',
+            'advanced': 'pica.tit=Python and pica.jhr=2023'
+        }
+    },
+    'swisscovery': {
+        'name': 'swisscovery (SLSP, Swiss academic union)',
+        'url': 'https://swisscovery.slsp.ch/view/sru/41SLSP_NETWORK',
+        'default_schema': 'marcxml',
+        'description': 'Swiss academic libraries union catalogue (SLSP/Alma)',
+        'version': '1.2',
+        'examples': {
+            'title': 'alma.title=Python',
+            'author': 'alma.creator=Einstein',
+            'isbn': 'alma.isbn=9783658310844',
+            'advanced': 'alma.title=Python and alma.creator=Rossum'
         }
     }
 }
