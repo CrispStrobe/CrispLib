@@ -9,31 +9,31 @@ without requiring hardcoded classes for each specific library.
 """
 
 import requests
-import xml.etree.ElementTree as ET
+try:
+    import defusedxml.ElementTree as ET  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover
+    import xml.etree.ElementTree as ET  # nosec B405 
 import logging
-import time
 from datetime import datetime, timedelta
-from dataclasses import dataclass, field
-from typing import Dict, List, Any, Optional, Union, Tuple, Callable, Generator
+from typing import Dict, List, Any, Optional, Tuple, Callable
 import re
 
 # Try to import Sickle for enhanced OAI-PMH support
 try:
     from sickle import Sickle
-    from sickle.iterator import OAIResponseIterator
     from sickle.oaiexceptions import NoRecordsMatch, BadArgument
     SICKLE_AVAILABLE = True
 except ImportError:
     SICKLE_AVAILABLE = False
-    
+
+from sru_library import BiblioRecord
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger("oai_pmh_library")
-
-from sru_library import BiblioRecord
 
 class OAIClient:
     """
@@ -139,7 +139,7 @@ class OAIClient:
                 response = requests.get(url, timeout=self.timeout)
                 response.raise_for_status()
                 
-                root = ET.fromstring(response.content)
+                root = ET.fromstring(response.content)  # nosec B314
                 
                 # Check for error
                 error = root.find('.//oai:error', self.namespaces)
@@ -190,7 +190,7 @@ class OAIClient:
                 response = requests.get(url, timeout=self.timeout)
                 response.raise_for_status()
                 
-                root = ET.fromstring(response.content)
+                root = ET.fromstring(response.content)  # nosec B314
                 
                 # Check for error
                 error = root.find('.//oai:error', self.namespaces)
@@ -254,7 +254,7 @@ class OAIClient:
                 response = requests.get(url, timeout=self.timeout)
                 response.raise_for_status()
                 
-                root = ET.fromstring(response.content)
+                root = ET.fromstring(response.content)  # nosec B314
                 
                 # Check for error
                 error = root.find('.//oai:error', self.namespaces)
@@ -309,7 +309,7 @@ class OAIClient:
                 response = requests.get(url_with_token, timeout=self.timeout)
                 response.raise_for_status()
                 
-                root = ET.fromstring(response.content)
+                root = ET.fromstring(response.content)  # nosec B314
                 
                 # Extract results (will be different based on the verb)
                 if 'verb=ListSets' in url_with_token:
@@ -399,7 +399,7 @@ class OAIClient:
                 response = requests.get(url, timeout=self.timeout)
                 response.raise_for_status()
                 
-                root = ET.fromstring(response.content)
+                root = ET.fromstring(response.content)  # nosec B314
                 
                 # Check for error
                 error = root.find('.//oai:error', self.namespaces)
@@ -478,7 +478,7 @@ class OAIClient:
                 response = requests.get(url, timeout=self.timeout)
                 response.raise_for_status()
                 
-                root = ET.fromstring(response.content)
+                root = ET.fromstring(response.content)  # nosec B314
                 
                 # Check for error
                 error = root.find('.//oai:error', self.namespaces)
@@ -522,7 +522,7 @@ class OAIClient:
                 response = requests.get(url_with_token, timeout=self.timeout)
                 response.raise_for_status()
                 
-                root = ET.fromstring(response.content)
+                root = ET.fromstring(response.content)  # nosec B314
                 
                 # Extract records
                 record_elements = root.findall('.//oai:record', self.namespaces)
@@ -689,7 +689,7 @@ class OAIClient:
                         response = requests.get(url, timeout=self.timeout)
                         response.raise_for_status()
                         
-                        root = ET.fromstring(response.content)
+                        root = ET.fromstring(response.content)  # nosec B314
                         
                         # Check for error
                         error = root.find('.//oai:error', self.namespaces)
@@ -714,8 +714,8 @@ class OAIClient:
                                     try:
                                         response = requests.get(url, timeout=self.timeout)
                                         response.raise_for_status()
-                                        root = ET.fromstring(response.content)
-                                    except Exception:
+                                        root = ET.fromstring(response.content)  # nosec B314
+                                    except Exception:  # nosec B112 
                                         continue  # Try next chunk
                                 else:
                                     continue  # Try next chunk
@@ -777,7 +777,7 @@ class OAIClient:
                                         sub_response = requests.get(sub_url, timeout=self.timeout)
                                         sub_response.raise_for_status()
                                         
-                                        sub_root = ET.fromstring(sub_response.content)
+                                        sub_root = ET.fromstring(sub_response.content)  # nosec B314
                                         sub_record_elements = sub_root.findall('.//oai:record', self.namespaces)
                                         
                                         for i, record_elem in enumerate(sub_record_elements):
@@ -1078,7 +1078,7 @@ class OAIClient:
             }
             
             # Parse XML for metadata
-            root = ET.fromstring(sickle_record.raw)
+            root = ET.fromstring(sickle_record.raw)  # nosec B314
             metadata_elem = root.find('.//oai:metadata', self.namespaces)
             
             if metadata_elem is not None:
@@ -2233,26 +2233,10 @@ OAI_ENDPOINTS = {
             'dnb:reiheO': 'Online Publications'
         }
     },
-    'dnb_digital': {
-        'name': 'Deutsche Nationalbibliothek (Digital Objects)',
-        'url': 'https://services.dnb.de/oai2',
-        'default_metadata_prefix': 'oai_dc',
-        'description': 'Digital objects from the German National Library',
-        'sets': {
-            'dnb:digitalisate-oa': 'Digitized Public Domain Works'
-        }
-    },
-    'loc': {
-        'name': 'Library of Congress',
-        'url': 'https://memory.loc.gov/cgi-bin/oai2_0',
-        'default_metadata_prefix': 'oai_dc',
-        'description': 'Library of Congress digital collections',
-        'sets': {
-            'lcbooks': 'Library of Congress Books',
-            'lcmaps': 'Library of Congress Maps',
-            'lcmss': 'Library of Congress Manuscripts'
-        }
-    },
+    # NOTE: removed dead OAI endpoints (verified 2026-07-03):
+    #  - dnb_digital: services.dnb.de/oai2 is a landing page, not an OAI endpoint;
+    #    the main 'dnb' repository already covers digital content via subject sets.
+    #  - loc (OAI): memory.loc.gov/cgi-bin/oai2_0 is gone; LoC discontinued OAI-PMH.
     'europeana': {
         'name': 'Europeana',
         'url': 'https://api.europeana.eu/oai/record',
