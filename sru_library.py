@@ -612,9 +612,8 @@ class SRUClient:
             './/title',
             './/marc:datafield[@tag="245"]/marc:subfield[@code="a"]',
             './/mxc:datafield[@tag="245"]/mxc:subfield[@code="a"]',
-            './/*[local-name()="title"]'
         ]
-        
+
         title = None
         for path in title_paths:
             try:
@@ -622,9 +621,16 @@ class SRUClient:
                 if elem is not None and elem.text and elem.text.strip():
                     title = elem.text.strip()
                     break
-            except Exception:  # nosec B110,B112 
+            except Exception:  # nosec B110,B112
                 continue
-        
+
+        if not title:
+            # namespace-agnostic fallback (no local-name() XPath — PLAN 3.4)
+            for el in record_data.iter():
+                if el.tag.rsplit('}', 1)[-1] == 'title' and el.text and el.text.strip():
+                    title = el.text.strip()
+                    break
+
         if not title:
             title = f"Untitled Record ({record_id})"
         
@@ -643,8 +649,6 @@ class SRUClient:
             './/mxc:datafield[@tag="100"]/mxc:subfield[@code="a"]',
             './/marc:datafield[@tag="700"]/marc:subfield[@code="a"]',
             './/mxc:datafield[@tag="700"]/mxc:subfield[@code="a"]',
-            './/*[local-name()="creator"]',
-            './/*[local-name()="author"]'
         ]
         
         seen_names = set()  # Track seen names to avoid duplicates
@@ -700,8 +704,6 @@ class SRUClient:
             './/mxc:datafield[@tag="260"]/mxc:subfield[@code="c"]',
             './/marc:datafield[@tag="264"]/marc:subfield[@code="c"]',
             './/mxc:datafield[@tag="264"]/mxc:subfield[@code="c"]',
-            './/*[local-name()="date"]',
-            './/*[local-name()="issued"]'
         ]
         
         for path in date_paths:
@@ -727,7 +729,6 @@ class SRUClient:
             './/mxc:datafield[@tag="260"]/mxc:subfield[@code="b"]',
             './/marc:datafield[@tag="264"]/marc:subfield[@code="b"]',
             './/mxc:datafield[@tag="264"]/mxc:subfield[@code="b"]',
-            './/*[local-name()="publisher"]'
         ]
         
         for path in publisher_paths:
@@ -768,10 +769,8 @@ class SRUClient:
             './/bibo:isbn10',
             './/bibo:isbn',
             './/bibo:gtin14',
-            './/dc:identifier[contains(text(), "ISBN")]',
             './/marc:datafield[@tag="020"]/marc:subfield[@code="a"]',
             './/mxc:datafield[@tag="020"]/mxc:subfield[@code="a"]',
-            './/*[local-name()="identifier" and contains(text(), "ISBN")]'
         ]
         
         for path in isbn_paths:
@@ -794,12 +793,10 @@ class SRUClient:
         issn = None
         issn_paths = [
             './/bibo:issn',
-            './/dc:identifier[contains(text(), "ISSN")]',
             './/marc:datafield[@tag="022"]/marc:subfield[@code="a"]',
             './/mxc:datafield[@tag="022"]/mxc:subfield[@code="a"]',
-            './/*[local-name()="identifier" and contains(text(), "ISSN")]'
         ]
-        
+
         for path in issn_paths:
             try:
                 elem = record_data.find(path, namespaces)
@@ -813,9 +810,36 @@ class SRUClient:
                     else:
                         issn = issn_text
                         break
-            except Exception:  # nosec B110,B112 
+            except Exception:  # nosec B110,B112
                 continue
-        
+
+        # Namespace-agnostic fallback for identifiers embedded in <identifier>
+        # element text, e.g. Dublin Core "<dc:identifier>ISBN 978-3-16-148410-0
+        # </dc:identifier>". ElementTree has no contains()/text()/local-name()
+        # XPath (raises "invalid predicate"), which silently disabled the old
+        # './/dc:identifier[contains(text(),"ISBN")]' paths — so DC records lost
+        # their ISBN/ISSN/URL. Iterate instead (PLAN 3.4).
+        def _localname(tag):
+            return tag.rsplit('}', 1)[-1] if isinstance(tag, str) and '}' in tag else tag
+        identifier_texts = [
+            el.text.strip()
+            for el in record_data.iter()
+            if _localname(el.tag) == 'identifier' and el.text and el.text.strip()
+        ]
+        if not isbn:
+            for t in identifier_texts:
+                if 'isbn' in t.lower():
+                    match = re.search(r'(?:ISBN[:\s]*)?(\d[\d\-X]+)', t)
+                    isbn = match.group(1) if match else t
+                    break
+        if not issn:
+            for t in identifier_texts:
+                if 'issn' in t.lower():
+                    match = re.search(r'(?:ISSN[:\s]*)?(\d{4}-\d{3}[\dX])', t)
+                    if match:
+                        issn = match.group(1)
+                        break
+
         # Try to find journal title (for articles)
         journal_title = None
         journal_paths = [
@@ -980,11 +1004,10 @@ class SRUClient:
         url_paths = [
             './/foaf:primaryTopic',
             './/umbel:isLike',
-            './/dc:identifier[contains(text(), "http")]',
             './/marc:datafield[@tag="856"]/marc:subfield[@code="u"]',
             './/mxc:datafield[@tag="856"]/mxc:subfield[@code="u"]'
         ]
-        
+
         for path in url_paths:
             try:
                 elems = record_data.findall(path, namespaces)
@@ -996,8 +1019,14 @@ class SRUClient:
                     # Check for text content
                     elif elem.text and elem.text.strip().startswith('http'):
                         urls.append(elem.text.strip())
-            except Exception:  # nosec B110,B112 
+            except Exception:  # nosec B110,B112
                 continue
+
+        # <identifier>http…</identifier> URLs (replaces the non-functional
+        # contains(text(),"http") XPath — PLAN 3.4).
+        for t in identifier_texts:
+            if t.startswith('http') and t not in urls:
+                urls.append(t)
         
         # Try to find subjects
         subjects = []

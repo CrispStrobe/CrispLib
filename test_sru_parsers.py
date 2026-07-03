@@ -108,3 +108,35 @@ def test_dc_cleans_bnf_names_and_infers_type():
 def test_clean_person_name_unit():
     assert clean_person_name('Habermas, Jürgen (1929-2026). Auteur du texte') == 'Habermas, Jürgen'
     assert clean_person_name('Guido van Rossum') == 'Guido van Rossum'
+
+
+# ── Generic parser: identifiers embedded in dc:identifier text (PLAN 3.4) ─────
+
+DC = 'http://purl.org/dc/elements/1.1/'
+
+
+def _dc(fields):
+    """Build a Dublin Core record container. `fields` is (localname, text)."""
+    ET.register_namespace('dc', DC)
+    rec = ET.Element('record')
+    for name, text in fields:
+        el = ET.SubElement(rec, f'{{{DC}}}{name}')
+        el.text = text
+    return rec
+
+
+def test_generic_parse_pulls_isbn_issn_url_from_dc_identifier():
+    """ElementTree has no contains(text()) XPath, so the generic parser must
+    iterate dc:identifier elements to recover ISBN/ISSN/URL embedded in text."""
+    rec = _dc([
+        ('title', 'A Generic Record'),
+        ('identifier', 'ISBN 978-3-16-148410-0'),
+        ('identifier', 'ISSN 0378-5955'),
+        ('identifier', 'http://example.org/record/1'),
+    ])
+    r = SRUClient(base_url='x')._generic_parse({'data': rec, 'id': 't', 'raw_xml': '<record/>'}, NS)
+    assert r is not None
+    assert r.title == 'A Generic Record'
+    assert r.isbn and r.isbn.replace('-', '') == '9783161484100'
+    assert r.issn == '0378-5955'
+    assert 'http://example.org/record/1' in r.urls
