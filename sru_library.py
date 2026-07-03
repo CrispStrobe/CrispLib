@@ -2543,21 +2543,86 @@ def parse_rdfxml(raw_record, namespaces):
         schema=raw_record.get('schema')
     )
 
-# Add function to generate BibTeX from BiblioRecord
+# ── Formatter helpers shared with CrispZotLib (parity-critical) ──────────────
+# These mirror src/modules/librarySearch/formatters.ts EXACTLY. The shared
+# golden files (fixtures/parity/, synced from CrispZotLib) assert byte-identical
+# BibTeX/RIS output across both languages — change them in lockstep only.
+
+def escape_bibtex(value: str) -> str:
+    """Escape BibTeX-special characters in a prose value. Applied to text
+    fields (title, names, journal, publisher, address, series, note). NOT
+    applied to url/doi/isbn, where a backslash would corrupt the identifier."""
+    return re.sub(r'([#$%&_{}])', r'\\\1', value)
+
+
+def clean_creator_name(raw: str) -> str:
+    """Strip role indicators ("Schmidt, Anna [Verfasser]") and stray brackets
+    from a creator name for BibTeX/RIS output."""
+    name = re.sub(r'\s*\[[^\]]*\]', '', raw)
+    name = re.sub(r',\s*$', '', name.strip())
+    name = re.sub(r'\]\s*$', '', name)
+    name = re.sub(r'^\s*\[', '', name)
+    return name
+
+
+# Substrings that mark a name as an organization rather than a person —
+# corporate authors ("United Nations") must not be split into "Nations, United".
+# Same pattern as CORPORATE_MARKERS in CrispZotLib's formatters.ts.
+CORPORATE_NAME_MARKERS = re.compile(
+    r'(univ(?:ersit)?|institut|department|abteilung|minist|organi[sz]ation|associat'
+    r'|society|gesellschaft|foundation|stiftung|verlag|bibliothek|library|committee'
+    r'|commission|kommission|council|corporation|gmbh|publish|verein|hochschule'
+    r'|akademie|academy|bundes|united nations|european union)'
+    r'|(\b(?:inc|ltd|ag|co|plc|llc|who|unesco|oecd|office|bureau|agency|company|press)\b)',
+    re.IGNORECASE,
+)
+
+
+def _bibtex_creator_list(names: List[str]) -> Optional[str]:
+    """Clean a creator list for BibTeX; None when no usable name remains."""
+    cleaned = [clean_creator_name(n) for n in names]
+    cleaned = [n for n in cleaned if n]
+    if not cleaned:
+        return None
+    return " and ".join(escape_bibtex(n) for n in cleaned)
+
+
+def format_ris_creator(raw: str) -> str:
+    """Format a creator for a RIS AU/ED line ("Last, First"). Role markers are
+    stripped; corporate and mononym names are kept verbatim rather than
+    flipped. Returns "" when nothing usable remains."""
+    name = clean_creator_name(raw)
+    if not name:
+        return ""
+    if ',' in name:
+        return name
+    if CORPORATE_NAME_MARKERS.search(name):
+        return name
+    parts = name.split()
+    if len(parts) == 1:
+        return name
+    return f"{parts[-1]}, {' '.join(parts[:-1])}"
+
+
 def bibtex_from_record(record: BiblioRecord) -> str:
     """
     Convert a BiblioRecord to BibTeX format.
-    
+
+    Parity-critical: must produce byte-identical output to CrispZotLib's
+    formatRecordBibtex (asserted by test_formatter_parity.py on the shared
+    goldens in fixtures/parity/).
+
     Args:
         record: BiblioRecord object
-        
+
     Returns:
         BibTeX formatted string
     """
     # Get citation key from record
     citation_key = record.get_citation_key()
-    
-    # Determine entry type
+
+    # Determine entry type; a record with a journal title but no explicit
+    # document_type is still an article.
     if record.document_type:
         doc_type_lower = record.document_type.lower()
         if "article" in doc_type_lower:
@@ -2572,145 +2637,99 @@ def bibtex_from_record(record: BiblioRecord) -> str:
             entry_type = "techreport"
         else:
             entry_type = "book"
+    elif record.journal_title:
+        entry_type = "article"
     else:
-        # Default to book if no document type specified
         entry_type = "book"
-    
+
     # Start building BibTeX
     bibtex = [f"@{entry_type}{{{citation_key},"]
-    
-    # Clean up the title
-    # Remove trailing author information after '/'
-    title = re.sub(r'\s*/\s*[^/]+$', '', record.title)
-    # Escape special characters
-    title = title.replace("{", "\\{").replace("}", "\\}")
+
+    # Strip the ISBD statement of responsibility (" / John Smith") from the
+    # title. Whitespace required on BOTH sides so in-word slashes survive
+    # ("TCP/IP", "Either/Or").
+    title = re.sub(r'\s+/\s+[^/]+$', '', record.title)
+    title = escape_bibtex(title)
     bibtex.append(f"  title = {{{title}}},")
-    
-    # Clean and add authors if available
+
+    # Authors / editors / translators (role markers stripped, empties dropped)
     if record.authors:
-        # Clean up author names
-        cleaned_authors = []
-        for author in record.authors:
-            # Remove role indicators
-            clean_author = re.sub(r'\s*\[[^\]]*\]', '', author)
-            # Remove trailing commas and whitespace
-            clean_author = re.sub(r',\s*$', '', clean_author.strip())
-            # Fix any broken bracket pairs
-            clean_author = re.sub(r'\]\s*$', '', clean_author)
-            clean_author = re.sub(r'^\s*\[', '', clean_author)
-            
-            if clean_author:
-                cleaned_authors.append(clean_author)
-        
-        if cleaned_authors:
-            # Format authors properly for BibTeX
-            authors_list = " and ".join(cleaned_authors)
+        authors_list = _bibtex_creator_list(record.authors)
+        if authors_list:
             bibtex.append(f"  author = {{{authors_list}}},")
-    
-    # Add editors if available
+
     if record.editors:
-        # Clean up editor names
-        cleaned_editors = []
-        for editor in record.editors:
-            # Remove role indicators
-            clean_editor = re.sub(r'\s*\[[^\]]*\]', '', editor)
-            # Remove trailing commas and whitespace
-            clean_editor = re.sub(r',\s*$', '', clean_editor.strip())
-            # Fix any broken bracket pairs
-            clean_editor = re.sub(r'\]\s*$', '', clean_editor)
-            clean_editor = re.sub(r'^\s*\[', '', clean_editor)
-            
-            if clean_editor:
-                cleaned_editors.append(clean_editor)
-        
-        if cleaned_editors:
-            # Format editors properly for BibTeX
-            editors_list = " and ".join(cleaned_editors)
+        editors_list = _bibtex_creator_list(record.editors)
+        if editors_list:
             bibtex.append(f"  editor = {{{editors_list}}},")
-    
-    # Add translators if available
+
     if record.translators:
-        # Clean up translator names
-        cleaned_translators = []
-        for translator in record.translators:
-            # Remove role indicators
-            clean_translator = re.sub(r'\s*\[[^\]]*\]', '', translator)
-            # Remove trailing commas and whitespace
-            clean_translator = re.sub(r',\s*$', '', clean_translator.strip())
-            # Fix any broken bracket pairs
-            clean_translator = re.sub(r'\]\s*$', '', clean_translator)
-            clean_translator = re.sub(r'^\s*\[', '', clean_translator)
-            
-            if clean_translator:
-                cleaned_translators.append(clean_translator)
-        
-        if cleaned_translators:
-            # Add translators in note field (BibTeX doesn't have a translator field)
-            translators_list = " and ".join(cleaned_translators)
+        translators_list = _bibtex_creator_list(record.translators)
+        if translators_list:
             bibtex.append(f"  translator = {{{translators_list}}},")
-    
+
     # Year
     if record.year:
         bibtex.append(f"  year = {{{record.year}}},")
-    
+
     # Journal for articles
     if entry_type == "article" and record.journal_title:
-        bibtex.append(f"  journal = {{{record.journal_title}}},")
-        
+        bibtex.append(f"  journal = {{{escape_bibtex(record.journal_title)}}},")
+
         # Volume
         if record.volume:
             bibtex.append(f"  volume = {{{record.volume}}},")
-            
+
         # Issue/Number
         if record.issue:
             bibtex.append(f"  number = {{{record.issue}}},")
-    
+
     # Publisher
     if record.publisher_name:
-        bibtex.append(f"  publisher = {{{record.publisher_name}}},")
-    
+        bibtex.append(f"  publisher = {{{escape_bibtex(record.publisher_name)}}},")
+
     # Address (place of publication)
     if record.place_of_publication:
-        bibtex.append(f"  address = {{{record.place_of_publication}}},")
-    
+        bibtex.append(f"  address = {{{escape_bibtex(record.place_of_publication)}}},")
+
     # Series
     if record.series:
-        bibtex.append(f"  series = {{{record.series}}},")
-    
+        bibtex.append(f"  series = {{{escape_bibtex(record.series)}}},")
+
     # ISBN
     if record.isbn:
         bibtex.append(f"  isbn = {{{record.isbn}}},")
-    
+
     # ISSN for journals
     if entry_type == "article" and record.issn:
         bibtex.append(f"  issn = {{{record.issn}}},")
-    
+
     # DOI
     if record.doi:
         bibtex.append(f"  doi = {{{record.doi}}},")
-    
+
     # Pages
     if record.pages:
         bibtex.append(f"  pages = {{{record.pages}}},")
-    
+
     # Edition
     if record.edition:
         bibtex.append(f"  edition = {{{record.edition}}},")
-    
+
     # URL (use the first one if multiple are available)
     if record.urls:
         bibtex.append(f"  url = {{{record.urls[0]}}},")
-    
+
     # Language
     if record.language:
         bibtex.append(f"  language = {{{record.language}}},")
-    
+
     # Put record ID in note field for reference
-    bibtex.append(f"  note = {{ID: {record.id}}}")
-    
+    bibtex.append(f"  note = {{ID: {escape_bibtex(record.id)}}}")
+
     # Close the entry
     bibtex.append("}")
-    
+
     return "\n".join(bibtex)
 
 # Function to convert a list of BiblioRecords to BibTeX format

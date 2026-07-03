@@ -24,7 +24,7 @@ import shutil
 import tempfile
 
 # Import library modules
-from sru_library import SRUClient, BiblioRecord, SRU_ENDPOINTS
+from sru_library import SRUClient, BiblioRecord, SRU_ENDPOINTS, format_ris_creator
 from oai_pmh_library import OAIClient, OAI_ENDPOINTS
 from ixtheo_library import IxTheoSearchHandler, IXTHEO_ENDPOINTS
 
@@ -434,119 +434,134 @@ def format_record_bibtex(record):
     return bibtex_from_record(record)
 
 
+def _sanitize_ris_value(value):
+    """RIS is line-based: an embedded newline in a value (common in abstracts)
+    splits it into malformed tag-less lines. Collapse newlines to spaces."""
+    return re.sub(r'[\r\n]+', ' ', str(value)).strip()
+
+
 def format_record_ris(record):
     """
     Format a BiblioRecord as RIS (Research Information Systems) format.
-    
+
+    Parity-critical: must produce byte-identical output to CrispZotLib's
+    formatRecordRis (asserted by test_formatter_parity.py on the shared
+    goldens in fixtures/parity/).
+
     Args:
         record: BiblioRecord object
-        
+
     Returns:
         RIS formatted string
     """
-    # Determine record type
-    if record.issn:
+    # Determine record type. A book carrying a series ISSN is still a book —
+    # only treat as a periodical when there's a journal title or an ISSN with
+    # no ISBN.
+    if record.journal_title or (record.issn and not record.isbn):
         record_type = "JOUR"  # Journal article
-    elif record.series:
+    elif record.series and record.document_type and 'chapter' in record.document_type.lower():
         record_type = "CHAP"  # Book chapter
     else:
         record_type = "BOOK"  # Book
-    
+
     # Start building RIS entry
     ris = ["TY  - " + record_type]
-    
+
     # Add ID
     ris.append(f"ID  - {record.id}")
-    
+
     # Add title
-    ris.append(f"TI  - {record.title}")
-    
-    # Add authors
+    ris.append(f"TI  - {_sanitize_ris_value(record.title)}")
+
+    # Add authors ("Last, First"; corporate/mononym names kept verbatim)
     for author in record.authors:
-        # For RIS, typically format is "lastname, firstname"
-        if ',' in author:
-            ris.append(f"AU  - {author}")
-        else:
-            # Convert "firstname lastname" to "lastname, firstname"
-            parts = author.split()
-            if len(parts) > 1:
-                last_name = parts[-1]
-                first_names = ' '.join(parts[:-1])
-                ris.append(f"AU  - {last_name}, {first_names}")
-            else:
-                ris.append(f"AU  - {author}")
+        name = format_ris_creator(author)
+        if name:
+            ris.append(f"AU  - {name}")
 
     # Add editors if present
     for editor in record.editors:
-        # For RIS, typically format is "lastname, firstname"
-        if ',' in editor:
-            ris.append(f"ED  - {editor}")
-        else:
-            # Convert "firstname lastname" to "lastname, firstname"
-            parts = editor.split()
-            if len(parts) > 1:
-                last_name = parts[-1]
-                first_names = ' '.join(parts[:-1])
-                ris.append(f"ED  - {last_name}, {first_names}")
-            else:
-                ris.append(f"ED  - {editor}")
-    
+        name = format_ris_creator(editor)
+        if name:
+            ris.append(f"ED  - {name}")
+
     # Add year
     if record.year:
         ris.append(f"PY  - {record.year}")
         ris.append(f"Y1  - {record.year}///")  # Year with // for month/day
-    
+
     # Add publisher
     if record.publisher_name:
         ris.append(f"PB  - {record.publisher_name}")
-    
+
     # Add place of publication
     if record.place_of_publication:
         ris.append(f"CY  - {record.place_of_publication}")
-    
-    # Add ISBN
-    if record.isbn:
-        ris.append(f"SN  - {record.isbn}")
-    
-    # Add ISSN
-    if record.issn:
-        ris.append(f"SN  - {record.issn}")
-    
+
+    # Add ISBN/ISSN. RIS uses a single `SN` tag for both, so emitting two
+    # lines is ambiguous to importers — pick the identifier matching the type
+    # (ISSN for periodicals, ISBN otherwise) and emit exactly one.
+    if record_type == "JOUR":
+        serial_number = record.issn or record.isbn
+    else:
+        serial_number = record.isbn or record.issn
+    if serial_number:
+        ris.append(f"SN  - {serial_number}")
+
     # Add edition
     if record.edition:
         ris.append(f"ET  - {record.edition}")
-    
-    # Add series
-    if record.series:
+
+    # Add series or journal title
+    if record_type == "JOUR" and record.journal_title:
+        ris.append(f"JO  - {record.journal_title}")
+        ris.append(f"T2  - {record.journal_title}")
+    elif record.series:
         ris.append(f"T2  - {record.series}")
-    
+
+    # Add volume
+    if record.volume:
+        ris.append(f"VL  - {record.volume}")
+
+    # Add issue
+    if record.issue:
+        ris.append(f"IS  - {record.issue}")
+
+    # Add pages
+    if record.pages:
+        ris.append(f"SP  - {record.pages}")
+
     # Add language
     if record.language:
         ris.append(f"LA  - {record.language}")
-    
+
+    # Add DOI
+    if record.doi:
+        ris.append(f"DO  - {record.doi}")
+
     # Add URLs
     for url in record.urls:
         ris.append(f"UR  - {url}")
-    
+
     # Add abstract
     if record.abstract:
-        ris.append(f"AB  - {record.abstract}")
-    
+        ris.append(f"AB  - {_sanitize_ris_value(record.abstract)}")
+
     # Add keywords (from subjects)
     for subject in record.subjects:
         ris.append(f"KW  - {subject}")
-    
+
     # Add note with format info
     if record.format:
         ris.append(f"N1  - Format: {record.format}")
-    
+
     # Add extent information
     if record.extent:
         ris.append(f"N1  - Extent: {record.extent}")
-    
+
     # End record
     ris.append("ER  - ")
-    
+
     return "\n".join(ris)
 
 
