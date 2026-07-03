@@ -1141,6 +1141,37 @@ class SRUClient:
         return []
 
 
+def clean_person_name(name):
+    """Strip life dates and role phrases that DC/RDF sources (esp. BnF) append to
+    creator names, e.g. "Habermas, Jürgen (1929-2026). Auteur du texte"."""
+    if not name:
+        return name
+    n = name.strip()
+    # BnF-style trailing role after a period: ". Auteur du texte", ". Éditeur scientifique"
+    n = re.sub(r'\.\s*(?:Auteur|[ÉE]diteur|Traducteur|Pr[ée]facier|Collaborateur|Illustrateur|Annotateur|Directeur|Author|Editor|Translator|Contributor)[^.]*$', '', n, flags=re.IGNORECASE)
+    # Trailing life dates in parentheses: "(1929-2026)", "(1929-)", "(1929-2026.)"
+    n = re.sub(r'\s*\(\s*\d{3,4}\s*-\s*\d{0,4}\.?\s*\)\s*$', '', n)
+    # Trailing life dates without parentheses: ", 1929-2026"
+    n = re.sub(r',?\s*\d{4}\s*-\s*\d{0,4}\s*$', '', n)
+    return n.strip().rstrip(',').strip()
+
+
+def infer_document_type(document_type, isbn, issn, journal_title, format_str=None):
+    """Fill in a document type from available clues when the source lacks one."""
+    if document_type:
+        return document_type
+    fmt = (format_str or '').lower()
+    if journal_title:
+        return "Journal Article"
+    if 'book' in fmt or 'buch' in fmt or 'monogr' in fmt:
+        return "Book"
+    if isbn:
+        return "Book"
+    if issn:
+        return "Journal"
+    return "Book"
+
+
 # Register parser for Dublin Core format
 @SRUClient.register_parser('info:srw/schema/1/dc-v1.1')
 @SRUClient.register_parser('dc')
@@ -1174,8 +1205,8 @@ def parse_dublin_core(raw_record, namespaces):
     creator_elems = data.findall('.//dc:creator', ns)
     for elem in creator_elems:
         if elem.text and elem.text.strip():
-            name = elem.text.strip()
-            
+            name = clean_person_name(elem.text.strip())
+
             # Check if it's an editor
             if re.search(r'\b(?:ed(?:itor)?|hrsg|hg|edit\.)\b', name.lower(), re.IGNORECASE) or "(ed" in name.lower():
                 # Clean editor name by removing role designation
@@ -1209,8 +1240,8 @@ def parse_dublin_core(raw_record, namespaces):
     contributor_elems = data.findall('.//dc:contributor', ns)
     for elem in contributor_elems:
         if elem.text and elem.text.strip():
-            contributor = elem.text.strip()
-            
+            contributor = clean_person_name(elem.text.strip())
+
             # Check if it's an editor
             if re.search(r'\b(?:ed(?:itor)?|hrsg|hg)\b', contributor.lower(), re.IGNORECASE) or "(ed" in contributor.lower():
                 # Clean editor name
@@ -1359,9 +1390,11 @@ def parse_dublin_core(raw_record, namespaces):
         document_type = "Journal Article"
     elif series:
         document_type = "Book Chapter"
-    elif 'book' in format_str.lower() if format_str else False:
+    elif format_str and 'book' in format_str.lower():
         document_type = "Book"
-    
+    # Fall back to ISBN/ISSN/format so DC records aren't left type-less.
+    document_type = infer_document_type(document_type, isbn, issn, journal_title, format_str)
+
     # Create and return BiblioRecord with all extracted info
     return BiblioRecord(
         id=record_id,
@@ -1931,16 +1964,18 @@ def parse_rdfxml(raw_record, namespaces):
         name = re.sub(r'\s+', ' ', name)     # Multiple spaces
         name = re.sub(r'[\s,;:\.]+$', '', name)  # Trailing punctuation/whitespace
         name = re.sub(r'^[\s,;:\.]+', '', name)  # Leading punctuation/whitespace
-        name = name.strip()
-        
+        name = clean_person_name(name.strip())
+
         if not name:
             return None, None, True
-        
-        # Check if this is a duplicate
-        is_duplicate = name in seen_names_set
+
+        # Duplicate check on a normalized key so "Jürgen Habermas" and
+        # "Habermas, Jürgen" are recognized as the same person.
+        norm_key = ' '.join(sorted(re.sub(r'[^\w\s]', ' ', name.lower()).split()))
+        is_duplicate = norm_key in seen_names_set
         if not is_duplicate:
-            seen_names_set.add(name)
-        
+            seen_names_set.add(norm_key)
+
         return name, role, is_duplicate
     
     # Process P60327 field (contributor statement)
@@ -2423,6 +2458,21 @@ def parse_rdfxml(raw_record, namespaces):
     logger.debug(f"  Publisher: {publisher_name}")
     logger.debug(f"  Type: {document_type}")
     
+    # Deduplicate authors by normalized name (P60327 statement vs dcterms:creator
+    # can list the same person as "Jürgen Habermas" and "Habermas, Jürgen").
+    _seen = set()
+    _deduped = []
+    for a in authors:
+        k = ' '.join(sorted(re.sub(r'[^\w\s]', ' ', a.lower()).split()))
+        if k and k not in _seen:
+            _seen.add(k)
+            _deduped.append(a)
+    authors = _deduped
+
+    # Fall back to ISBN/ISSN when the RDF type was generic/missing.
+    if not document_type or document_type.lower() in ('document', 'text', 'resource'):
+        document_type = infer_document_type(None, isbn, issn, None)
+
     # Create and return BiblioRecord
     return BiblioRecord(
         id=record_id,
