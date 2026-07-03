@@ -44,12 +44,52 @@ pip install pyzotero lxml
 
 ## Modules
 
-The framework consists of four main Python modules:
+The framework consists of five main Python modules:
 
 1. `sru_library.py` - Handles SRU protocol communication
 2. `oai_pmh_library.py` - Handles OAI-PMH protocol communication
 3. `ixtheo_library.py` - Handles IxTheo specialized database searches
 4. `library_search.py` - Command-line interface integrating all backends
+5. `identifier_resolver.py` - Resolves DOI / PMID / ISBN / URL → citation metadata
+
+### Identifier Resolution
+
+`identifier_resolver.py` is a lightweight, dependency-minimal module (`requests` + stdlib only) that turns a known bibliographic identifier into a normalized metadata dict:
+
+| Identifier | Source                                |
+|------------|---------------------------------------|
+| DOI        | Crossref via `doi.org` content negotiation (CSL-JSON) |
+| PMID       | NCBI E-utilities (`esummary`)         |
+| ISBN       | Open Library (`/api/books`)           |
+| URL        | Wikipedia Citoid                      |
+
+Type is auto-detected; pass `id_type=` to override. Standalone CLI:
+
+```bash
+python identifier_resolver.py 10.1038/nature12373
+python identifier_resolver.py 9783658310844 isbn
+python identifier_resolver.py 23877393 pmid
+python identifier_resolver.py "https://example.org/article" url
+```
+
+Programmatic use:
+
+```python
+from identifier_resolver import resolve_identifier
+record = resolve_identifier("10.1038/nature12373")
+# {'source': 'crossref', 'title': '...', 'authors': [...], 'year': '2013',
+#  'journal': 'Nature', 'volume': '500', 'doi': '10.1038/nature12373', ...}
+```
+
+### Security note (XML parsing)
+
+`sru_library.py` and `oai_pmh_library.py` parse XML responses from external library catalogs. Both modules prefer **`defusedxml.ElementTree`** when available to harden against XXE, billion-laughs, and quadratic-blowup attacks. Install it for production use:
+
+```bash
+pip install defusedxml
+```
+
+If defusedxml is not installed, the modules fall back to stdlib `xml.etree.ElementTree`.
 
 ## Usage Examples
 
