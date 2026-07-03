@@ -10,9 +10,7 @@ and retrieve bibliographic data in various formats.
 import re
 import time
 import logging
-from dataclasses import dataclass, field
-from typing import Dict, List, Any, Optional, Union, Tuple
-import urllib.parse
+from typing import Dict, List, Any, Optional, Tuple
 
 import requests
 from bs4 import BeautifulSoup
@@ -78,6 +76,9 @@ class IxTheoClient:
         try:
             self._debug_print("Initializing session...")
             
+            # Clear the IxTheo proof-of-work wall before any request (PLAN 4.2).
+            self._solve_pow_cookie()
+
             # Visit the main page
             response = self.session.get(self.base_url, timeout=self.timeout)
             if response.status_code != 200:
@@ -92,6 +93,27 @@ class IxTheoClient:
         except requests.exceptions.RequestException as e:
             logger.error(f"Error initializing session: {e}")
     
+    def _solve_pow_cookie(self):
+        """Solve IxTheo's JS proof-of-work "Verifying your browser" challenge
+        (PLAN 4.2). The page finds i such that sha256(nonce+ts+i) starts with
+        "0000", then sets a pow_token=nonce:ts:i cookie (valid 30 min). A plain
+        request with no cookie gets the challenge page instead of results, so we
+        compute the same token and set the cookie on the session."""
+        import hashlib
+        import uuid
+        nonce = str(uuid.uuid4())
+        ts = int(time.time())
+        i = 0
+        while i < 20_000_000:
+            if hashlib.sha256(f"{nonce}{ts}{i}".encode()).hexdigest().startswith("0000"):
+                break
+            i += 1
+        domain = self.base_url.split("://")[-1].split("/")[0]
+        self.session.cookies.set(
+            "pow_token", f"{nonce}:{ts}:{i}", domain=domain, path="/"
+        )
+        self._debug_print(f"Solved IxTheo proof-of-work challenge in {i} hashes")
+
     def _extract_csrf_token(self, html_content):
         """
         Extract CSRF token from HTML content
@@ -136,7 +158,7 @@ class IxTheoClient:
         self._debug_print(f"Searching for: {query} (page {page})")
         
         # Prepare parameters
-        params = {
+        params: Dict[str, Any] = {
             "lookfor": query,
             "type": search_type,
             "limit": limit,
@@ -792,19 +814,19 @@ class IxTheoClient:
                 # Map RIS type to BibTeX type
                 if value == "JOUR":
                     entry_type = "article"
-                    self._debug_print(f"Setting entry type to article based on JOUR")
+                    self._debug_print("Setting entry type to article based on JOUR")
                 elif value == "BOOK":
                     entry_type = "book"
-                    self._debug_print(f"Setting entry type to book based on BOOK")
+                    self._debug_print("Setting entry type to book based on BOOK")
                 elif value == "CHAP":
                     entry_type = "incollection"
-                    self._debug_print(f"Setting entry type to incollection based on CHAP")
+                    self._debug_print("Setting entry type to incollection based on CHAP")
                 elif value == "CONF":
                     entry_type = "inproceedings"
-                    self._debug_print(f"Setting entry type to inproceedings based on CONF")
+                    self._debug_print("Setting entry type to inproceedings based on CONF")
                 elif value == "THES":
                     entry_type = "phdthesis"
-                    self._debug_print(f"Setting entry type to phdthesis based on THES")
+                    self._debug_print("Setting entry type to phdthesis based on THES")
                 self._debug_print(f"Entry type set to: {entry_type}")
                 
             elif tag == "TI" or tag == "T1":
@@ -873,7 +895,7 @@ class IxTheoClient:
                 
             elif tag == "AB":
                 abstract = value
-                self._debug_print(f"Abstract set")
+                self._debug_print("Abstract set")
         
         # Construct page range if we have both start and end pages
         if start_page and end_page:
@@ -905,17 +927,17 @@ class IxTheoClient:
             citation_key = f"ixtheo_{record_id}"
             self._debug_print(f"No author/year, using ID-based citation key: {citation_key}")
 
+        # Build BibTeX entry
+        bibtex = [f"@{entry_type}{{{citation_key},"]
+
         if editors:
             # Format editors for BibTeX
             formatted_editors = []
             for editor in editors:
                 # Ensure proper formatting (already in "lastname, firstname" in RIS)
                 formatted_editors.append(editor)
-            
+
             bibtex.append(f"  editor = {{{' and '.join(formatted_editors)}}},")
-        
-        # Build BibTeX entry
-        bibtex = [f"@{entry_type}{{{citation_key},"]
         
         # Add title
         if title:
@@ -1066,7 +1088,7 @@ class IxTheoSearchHandler:
             Enhanced BiblioRecord with complete metadata from MARC
         """
         if not record.id:
-            logger.debug(f"Record has no ID, returning unmodified")
+            logger.debug("Record has no ID, returning unmodified")
             return record
         
         # Get MARC export data
@@ -1263,7 +1285,7 @@ class IxTheoSearchHandler:
             Enhanced BiblioRecord with complete metadata
         """
         if not record.id:
-            logger.debug(f"Record has no ID, returning unmodified")
+            logger.debug("Record has no ID, returning unmodified")
             return record
         
         # First get detailed record information
@@ -1566,7 +1588,7 @@ class IxTheoSearchHandler:
             try:
                 # Convert the 4-digit hex code to an integer and then to a character
                 return chr(int(match.group(1), 16))
-            except:
+            except (ValueError, TypeError):
                 return match.group(0)  # Return the original match if conversion fails
         
         text = re.sub(r'\\u([0-9a-fA-F]{4})', replace_unicode_escapes, text)
