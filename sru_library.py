@@ -932,7 +932,9 @@ class SRUClient:
         
         try:
             leader_elem = record_data.find('.//marc:leader', namespaces)
-            if not leader_elem:
+            # NB: `if not leader_elem` is True for a childless element in ElementTree
+            # (truthiness = has children), which wrongly discarded the leader.
+            if leader_elem is None:
                 leader_elem = record_data.find('.//mxc:leader', namespaces)
             if leader_elem is not None and leader_elem.text:
                 leader = leader_elem.text
@@ -1594,12 +1596,40 @@ def parse_marcxml(raw_record, namespaces):
                 doi = subfield_a.text.strip()
                 break
     
-    # Find subjects (MARC fields 650, 651)
+    # Find subjects (MARC 650/651 topical/geographic, 653 uncontrolled index terms)
     subjects = []
-    for tag in ['650', '651']:
-        subject_fields = find_datafields(tag, "a")
-        subjects.extend(subject_fields)
-    
+    for tag in ['650', '651', '653']:
+        for s in find_datafields(tag, "a"):
+            if s not in subjects:
+                subjects.append(s)
+    # DDC / classification (082 Dewey, 084 other classification e.g. German "sdnb")
+    for tag in ['082', '084']:
+        for code in find_datafields(tag, "a"):
+            tagged = f"DDC:{code}" if tag == '082' else code
+            if tagged not in subjects:
+                subjects.append(tagged)
+
+    # Abstract / summary (MARC 520 subfield a)
+    abstract = None
+    abstract_fields = find_datafields("520", "a")
+    if abstract_fields:
+        abstract = " ".join(abstract_fields).strip()
+
+    # Corporate authors (110 main / 710 added entry). Kept as full-name strings.
+    for tag, bucket in [("110", authors), ("710", contributors)]:
+        for prefix in ['marc', 'mxc']:
+            for fld in record.findall(f'.//{prefix}:datafield[@tag="{tag}"]', ns):
+                nm = fld.find(f'./{prefix}:subfield[@code="a"]', ns)
+                if nm is not None and nm.text and nm.text.strip():
+                    name = nm.text.strip().rstrip('.,;')
+                    if name in seen_names:
+                        continue
+                    seen_names.add(name)
+                    if bucket is authors:
+                        authors.append(name)
+                    else:
+                        contributors.append({"name": name, "role": "corporate"})
+
     # Find language (MARC field 041 subfield a or 008 positions 35-37)
     language = None
     language_fields = find_datafields("041", "a")
@@ -1651,59 +1681,83 @@ def parse_marcxml(raw_record, namespaces):
             if title_subfield is not None and title_subfield.text:
                 host_title = title_subfield.text.strip()
 
-                # Check for journal by looking for volume info
                 g_subfield = fld.find(f'./{prefix}:subfield[@code="g"]', ns)
-                if g_subfield is not None and g_subfield.text:
-                    vol_text = g_subfield.text.strip()
-                    # Check if this looks like a journal reference
-                    if re.search(r'vol|issue|number|no\.|band', vol_text.lower()):
-                        journal_title = host_title
-                        
-                        # Extract volume/issue from text like "vol. 10, no. 3, p. 45-67"
-                        vol_match = re.search(r'vol(?:ume)?\.?\s*(\d+)', vol_text, re.IGNORECASE)
-                        if vol_match:
-                            volume = vol_match.group(1)
-                        
-                        issue_match = re.search(r'(?:no|issue|num)\.?\s*(\d+)', vol_text, re.IGNORECASE)
-                        if issue_match:
-                            issue = issue_match.group(1)
-                        
-                        # Extract page range
-                        page_match = re.search(r'p(?:age)?s?\.?\s*(\d+)(?:\s*[-–]\s*(\d+))?', vol_text, re.IGNORECASE)
-                        if page_match:
-                            if page_match.group(2):  # Range
-                                pages = f"{page_match.group(1)}-{page_match.group(2)}"
-                            else:  # Single page
-                                pages = page_match.group(1)
-                    else:
-                        # Likely a book chapter - use series field
-                        series = host_title
+                vol_text = g_subfield.text.strip() if (g_subfield is not None and g_subfield.text) else ''
+                # $7 position 3 = host bibliographic level ('s' = serial -> journal,
+                # 'm' = monograph -> chapter). Authoritative; fall back to $g sniffing
+                # (English + German forms like "78(2024), 3, Seite 205-213" carry no keyword).
+                link7_sub = fld.find(f'./{prefix}:subfield[@code="7"]', ns)
+                link7 = (link7_sub.text or '').strip() if link7_sub is not None else ''
+                host_bib_level = link7[3].lower() if len(link7) >= 4 else ''
+                issn_sub = fld.find(f'./{prefix}:subfield[@code="x"]', ns)
+                host_issn = (issn_sub.text or '').strip() if issn_sub is not None else None
+
+                if host_bib_level == 's':
+                    is_journal = True
+                elif host_bib_level == 'm':
+                    is_journal = False
+                else:
+                    is_journal = bool(re.search(r'vol|issue|no\.?|nr\.?|number|band|bd\.?|jg\.?|jahrg|heft|\(\d{4}\)', vol_text, re.IGNORECASE))
+
+                if is_journal:
+                    journal_title = host_title
+                    if host_issn and not issn:
+                        issn = host_issn
+                    vol_match = (re.search(r'(?:vol(?:ume)?|bd\.?|band|jg\.?|jahrg(?:ang)?)\.?\s*(\d+)', vol_text, re.IGNORECASE)
+                                 or re.search(r'(\d+)\s*\(\d{4}\)', vol_text)
+                                 or re.search(r'^\s*(\d+)\b', vol_text))
+                    if vol_match:
+                        volume = vol_match.group(1)
+                    issue_match = (re.search(r'(?:no|nr|issue|num|heft|h)\.?\s*(\d+)', vol_text, re.IGNORECASE)
+                                   or re.search(r'\)\s*,\s*(\d+)', vol_text))
+                    if issue_match:
+                        issue = issue_match.group(1)
+                    page_match = re.search(r'\b(?:seite|pages?|pp?|s)\.?\s*(\d+)(?:\s*[-–]\s*(\d+))?', vol_text, re.IGNORECASE)
+                    if page_match:
+                        pages = f"{page_match.group(1)}-{page_match.group(2)}" if page_match.group(2) else page_match.group(1)
+                else:
+                    # Monograph host -> book chapter
+                    series = host_title
     
-    # Determine document type
+    # Determine document type. The leader is authoritative: position 6 = type of
+    # record (material), position 7 = bibliographic level (monograph/serial/part).
+    material_type = None
+    biblio_level = None
+    for prefix in ['marc', 'mxc']:
+        leader_elem = record.find(f'.//{prefix}:leader', ns)
+        if leader_elem is not None and leader_elem.text and len(leader_elem.text) >= 8:
+            material_type = leader_elem.text[6]
+            biblio_level = leader_elem.text[7]
+            break
+
+    # Non-textual material types take precedence over the bibliographic level.
+    NONTEXT = {'c': 'Score', 'd': 'Score', 'e': 'Map', 'f': 'Map',
+               'g': 'Video', 'i': 'Audio Recording', 'j': 'Music Recording',
+               'k': 'Image', 'm': 'Electronic Resource', 'o': 'Kit', 'r': 'Object'}
     document_type = None
-    if journal_title:
-        document_type = "Journal Article"
-    elif series and not journal_title:
-        document_type = "Book Chapter"
-    else:
-        # Leader position 6 often indicates material type
-        for prefix in ['marc', 'mxc']:
-            leader_elem = record.find(f'.//{prefix}:leader', ns)
-            if leader_elem is not None and leader_elem.text:
-                material_type = leader_elem.text[6] if len(leader_elem.text) > 6 else None
-                if material_type == 'a':  # Language material
-                    document_type = "Book"
-                elif material_type == 'e':  # Printed music
-                    document_type = "Score"
-                elif material_type == 'g':  # Projected medium
-                    document_type = "Visual Material"
-                elif material_type == 'i':  # Nonmusical sound recording
-                    document_type = "Audio Recording"
-                elif material_type == 'j':  # Musical sound recording
-                    document_type = "Music Recording"
-                elif material_type == 'm':  # Computer file
-                    document_type = "Electronic Resource"
-                break
+    if material_type in NONTEXT:
+        document_type = NONTEXT[material_type]
+    elif biblio_level == 'm':
+        document_type = "Book"            # standalone monograph (even if in a series)
+    elif biblio_level == 's':
+        document_type = "Journal"         # the serial itself
+    elif biblio_level in ('a', 'b'):
+        # Component part: journal article if the host is a serial, else a book chapter.
+        document_type = "Journal Article" if journal_title else "Book Chapter"
+    elif biblio_level == 'c':
+        document_type = "Book"            # collection
+    # Fallbacks when the leader is missing/uninformative.
+    if not document_type:
+        if journal_title:
+            document_type = "Journal Article"
+        elif isbn:
+            document_type = "Book"
+        elif issn:
+            document_type = "Journal"
+        elif series:
+            document_type = "Book Chapter"
+        else:
+            document_type = "Book"
     
     # Create BiblioRecord
     return BiblioRecord(
@@ -1719,7 +1773,7 @@ def parse_marcxml(raw_record, namespaces):
         isbn=isbn,
         issn=issn,
         urls=urls,
-        abstract=None,  # MARC doesn't typically have abstracts in basic records
+        abstract=abstract,  # MARC 520 summary/abstract, if present
         language=language,
         format=document_type,  # Use determined document type
         subjects=subjects,
