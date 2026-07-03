@@ -1548,6 +1548,11 @@ def parse_marcxml(raw_record, namespaces):
                         if name not in seen_names:
                             translators.append(name)
                             seen_names.add(name)
+                    elif any(r in role for r in ['verf', 'author', 'autor', 'creator']):
+                        # Author relator across languages (DNB/K10plus: "Verfasser")
+                        if name not in seen_names:
+                            authors.append(name)
+                            seen_names.add(name)
                     else:
                         # Other contributor role
                         if name not in seen_names:
@@ -1578,6 +1583,11 @@ def parse_marcxml(raw_record, namespaces):
                     elif any(r in role for r in ['transl', 'übers']):
                         if name not in seen_names:
                             translators.append(name)
+                            seen_names.add(name)
+                    elif any(r in role for r in ['verf', 'author', 'autor', 'creator']):
+                        # Author relator across languages (DNB/K10plus: "Verfasser")
+                        if name not in seen_names:
+                            authors.append(name)
                             seen_names.add(name)
                     else:
                         # Other contributor role

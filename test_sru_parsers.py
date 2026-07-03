@@ -140,3 +140,14 @@ def test_generic_parse_pulls_isbn_issn_url_from_dc_identifier():
     assert r.isbn and r.isbn.replace('-', '') == '9783161484100'
     assert r.issn == '0378-5955'
     assert 'http://example.org/record/1' in r.urls
+
+
+def test_verfasser_relator_maps_to_author():
+    """DNB/K10plus tag the main author with 100 $e='Verfasser' (German for
+    'author'); it must land in authors, not contributors (PLAN 5.3 parity)."""
+    rec = _marc('00000nam a2200000c 4500', [
+        ('245', '1', '0', [('a', 'Ein Buch')]),
+        ('100', '1', ' ', [('a', 'Mustermann, Erika'), ('e', 'Verfasser')]),
+    ])
+    r = _parse_marc(rec)
+    assert 'Mustermann, Erika' in r.authors
