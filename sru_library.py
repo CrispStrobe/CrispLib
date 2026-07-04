@@ -1185,6 +1185,26 @@ def clean_person_name(name):
     return n.strip().rstrip(',').strip()
 
 
+def map_dc_type(dc_type_text):
+    """Map dc:type free text (dcmitype terms + BnF French labels, possibly several
+    joined) to a document_type for non-text material, or '' for text/unknown.
+    'video' is tested before 'image' so 'moving image' wins."""
+    t = (dc_type_text or '').lower()
+    if re.search(r'moving image|image anim|\bvideo\b|\bfilm\b', t):
+        return "Video"
+    if re.search(r'\bsound\b|\baudio\b|\bmusic\b|musique|enregistrement sonore', t):
+        return "Audio"
+    if re.search(r'still image|image fixe|photograph|\bartwork\b', t):
+        return "Image"
+    if re.search(r'cartograph|\bmap\b|\bcarte\b', t):
+        return "Map"
+    if re.search(r'software|logiciel', t):
+        return "Software"
+    if re.search(r'\bdataset\b|données de (?:la )?recherche', t):
+        return "Dataset"
+    return ""
+
+
 def infer_document_type(document_type, isbn, issn, journal_title, format_str=None):
     """Fill in a document type from available clues when the source lacks one."""
     if document_type:
@@ -1369,7 +1389,14 @@ def parse_dublin_core(raw_record, namespaces):
     format_elem = data.find('.//dc:format', ns)
     if format_elem is not None and format_elem.text:
         format_str = format_elem.text.strip()
-    
+
+    # dc:type material typing (BnF etc. emit "moving image"/"image animée", …).
+    dc_type_text = ' | '.join(
+        (e.text or '').strip().lower()
+        for e in data.findall('.//dc:type', ns) if e.text
+    )
+    av_type = map_dc_type(dc_type_text)
+
     # Find extent (pages, etc.)
     extent = None
     extent_elem = data.find('.//dcterms:extent', ns)
@@ -1417,6 +1444,8 @@ def parse_dublin_core(raw_record, namespaces):
     document_type = None
     if journal_title and (volume or issue):
         document_type = "Journal Article"
+    elif av_type:
+        document_type = av_type
     elif series:
         document_type = "Book Chapter"
     elif format_str and 'book' in format_str.lower():
@@ -1497,6 +1526,18 @@ def parse_marcxml(raw_record, namespaces):
                     record = elem
                     break
     
+    # Some SRU servers (e.g. hebis / PICA-CBS) return namespace-LESS MARCXML
+    # (<record>/<datafield> with no MARC21 namespace). Bind the 'marc' prefix to
+    # whatever namespace the datafields actually use so every lookup below matches.
+    def _detect_marc_ns(rec):
+        for el in rec.iter():
+            if isinstance(el.tag, str) and el.tag.rsplit('}', 1)[-1] == 'datafield':
+                return el.tag[1:el.tag.index('}')] if el.tag.startswith('{') else ''
+        return None
+    _detected = _detect_marc_ns(record)
+    if _detected is not None and _detected not in (ns.get('marc'), ns.get('mxc')):
+        ns['marc'] = _detected
+
     # Helper function to find datafields
     def find_datafields(tag, code):
         fields = []
