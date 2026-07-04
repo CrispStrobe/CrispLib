@@ -1170,19 +1170,41 @@ class SRUClient:
         return []
 
 
+# Controlled relator vocabulary (FR/DE/EN) that DC/RDF sources — chiefly BnF and
+# GND — append to a creator name after a period, e.g.
+# "Tornatore, Giuseppe (1956-....). Réalisateur". Explicit so ordinary
+# period-bearing names ("Smith, J. R.") are never truncated. Must stay in sync
+# with cleanPersonName in CrispZotLib/sruRecordParser.ts + citer (parser golden).
+_RELATOR_WORDS = (
+    r"Auteur|[ÉE]diteur|Traducteur|Pr[ée]facier|Postfacier|Collaborateur|"
+    r"Illustrateur|Annotateur|Directeur|R[ée]alisateur|Sc[ée]nariste|Adaptateur|"
+    r"Compositeur|Act(?:eur|rice)|Interpr[èe]te|Chanteu(?:r|se)|Photographe|"
+    r"Dessinateur|Graveur|Metteur\s+en\s+sc[èe]ne|Producteur|Narrateur|"
+    r"Chor[ée]graphe|Danseu(?:r|se)|Musicien|Arrangeur|Parolier|Distributeur|"
+    r"Imprimeur|Cartographe|Lithographe|Peintre|Sculpteur|Architecte|R[ée]dacteur|"
+    r"Monteur|Commissaire|Conseiller|"
+    r"Herausgeber(?:in)?|[ÜU]bersetzer(?:in)?|Verfasser(?:in)?|Mitwirkende[rn]?|"
+    r"Bearbeiter|Erz[äa]hler|Komponist|Regisseur|Schauspieler|"
+    r"Author|Editor|Translator|Contributor|Illustrator|Narrator|Composer|"
+    r"Director|Screenwriter|Producer|Performer|Actor|Photographer|Cartographer"
+)
+_ROLE_SUFFIX_RE = re.compile(r'\.\s*(?:' + _RELATOR_WORDS + r')\b[^.]*$', re.IGNORECASE)
+
+
 def clean_person_name(name):
     """Strip life dates and role phrases that DC/RDF sources (esp. BnF) append to
     creator names, e.g. "Habermas, Jürgen (1929-2026). Auteur du texte"."""
     if not name:
         return name
     n = name.strip()
-    # BnF-style trailing role after a period: ". Auteur du texte", ". Éditeur scientifique"
-    n = re.sub(r'\.\s*(?:Auteur|[ÉE]diteur|Traducteur|Pr[ée]facier|Collaborateur|Illustrateur|Annotateur|Directeur|Author|Editor|Translator|Contributor)[^.]*$', '', n, flags=re.IGNORECASE)
-    # Trailing life dates in parentheses: "(1929-2026)", "(1929-)", "(1929-2026.)"
-    n = re.sub(r'\s*\(\s*\d{3,4}\s*-\s*\d{0,4}\.?\s*\)\s*$', '', n)
-    # Trailing life dates without parentheses: ", 1929-2026"
-    n = re.sub(r',?\s*\d{4}\s*-\s*\d{0,4}\s*$', '', n)
-    return n.strip().rstrip(',').strip()
+    # Life-date parenthetical anywhere: "(1929-2026)", "(1956-)", "(1956-....)",
+    # "(1963-.... ; actrice)". Requires 3-4 leading digits + a dash.
+    n = re.sub(r'\s*\(\s*\d{3,4}\s*[-–][^)]*\)', '', n)
+    # Trailing controlled relator phrase after a period.
+    n = _ROLE_SUFFIX_RE.sub('', n)
+    # Bare trailing life-date range: "Einstein, Albert 1879-1955".
+    n = re.sub(r',?\s*\d{3,4}\s*[-–]\s*\d{0,4}\s*$', '', n)
+    return re.sub(r'[,;\s]+$', '', n.strip())
 
 
 def map_dc_type(dc_type_text):

@@ -26,7 +26,7 @@ try:
 except ImportError:
     SICKLE_AVAILABLE = False
 
-from sru_library import BiblioRecord
+from sru_library import BiblioRecord, map_dc_type, infer_document_type
 
 # Configure logging
 logging.basicConfig(
@@ -1596,7 +1596,17 @@ def parse_dublin_core(record, namespaces):
         place_match = re.search(r'^([^:]+):', source_text)
         if place_match:
             place_of_publication = place_match.group(1).strip()
-    
+
+    # dc:type material typing + fallback (this parser previously left type unset,
+    # so Europeana/DDB AV & images imported untyped). map_dc_type handles
+    # moving image/sound/still image/…; infer_document_type covers the rest.
+    dc_type_text = ' | '.join(
+        (e.text or '').strip().lower()
+        for e in metadata_root.findall('./dc:type', ns) if e.text
+    )
+    document_type = map_dc_type(dc_type_text) or infer_document_type(
+        None, isbn, issn, None, format_str)
+
     return BiblioRecord(
         id=record_id,
         title=title,
@@ -1613,6 +1623,7 @@ def parse_dublin_core(record, namespaces):
         language=language,
         format=format_str,
         subjects=subjects,
+        document_type=document_type,
         raw_data=record.get('raw', '')
     )
 
