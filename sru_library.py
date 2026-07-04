@@ -1540,7 +1540,7 @@ def parse_marcxml(raw_record, namespaces):
                 role = role_subfield.text.strip().lower() if role_subfield is not None and role_subfield.text else ''
                 
                 if role:
-                    if any(r in role for r in ['edit', 'hrsg', 'hg']):
+                    if any(r in role for r in ['edit', 'hrsg', 'hg', 'herausg']):
                         if name not in seen_names:
                             editors.append(name)
                             seen_names.add(name)
@@ -1576,7 +1576,7 @@ def parse_marcxml(raw_record, namespaces):
                 role = role_subfield.text.strip().lower() if role_subfield is not None and role_subfield.text else ''
                 
                 if role:
-                    if any(r in role for r in ['edit', 'hrsg', 'hg']):
+                    if any(r in role for r in ['edit', 'hrsg', 'hg', 'herausg']):
                         if name not in seen_names:
                             editors.append(name)
                             seen_names.add(name)
