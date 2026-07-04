@@ -203,19 +203,27 @@ python library_search.py --create-endpoint --name "My Library" --url "https://my
 
 ## Supported Endpoints
 
+The endpoint list is a shared manifest (`endpoints.json`) whose canonical copy lives in the sibling
+[CrispZotLib](https://github.com/CrispStrobe/CrispZotLib) repo and is byte-copied here by its
+`scripts/sync-endpoints.sh` (all URLs verified live in July 2026).
+
 ### SRU Endpoints
 
 - Deutsche Nationalbibliothek (DNB)
 - Bibliothèque nationale de France (BNF)
-- Library of Congress (LOC)
 - ZDB - German Union Catalogue of Serials
+- K10plus (GBV+SWB union catalogue)
+- B3Kat (Bibliotheksverbund Bayern + KOBV)
+- SLSP swisscovery (Swiss academic union catalogue)
+- ÖBV (Austrian Library Network)
+- Library of Congress (SRU gateway on port 210)
+- KB - National Library of the Netherlands (GGC)
+- BIBSYS (Norwegian academic libraries, Alma)
 - More can be added as custom endpoints
 
 ### OAI-PMH Endpoints
 
 - Deutsche Nationalbibliothek (DNB)
-- Deutsche Nationalbibliothek Digital Objects
-- Library of Congress
 - Europeana
 - Deutsche Digitale Bibliothek (DDB)
 - Harvard University Library
@@ -223,11 +231,27 @@ python library_search.py --create-endpoint --name "My Library" --url "https://my
 - KITopen (Karlsruher Institut für Technologie)
 - arXiv
 - Directory of Open Access Journals (DOAJ)
+- EZB - Elektronische Zeitschriftenbibliothek (Regensburg)
 
 ### Specialized Endpoints
 
-- IxTheo (Index Theologicus) - Specialized theological database
+- IxTheo (Index Theologicus) - Specialized theological database (the anti-bot
+  proof-of-work challenge is solved automatically)
 - Zotero - Reference management software
+
+## Testing
+
+```bash
+pip install pytest
+python -m pytest
+```
+
+- `test_sru_parsers.py` — offline contract tests for the SRU/MARC/Dublin-Core parsers.
+- `test_formatter_parity.py` — asserts the BibTeX/RIS formatters produce **byte-identical**
+  output to CrispZotLib's TypeScript formatters on the shared golden files in
+  `fixtures/parity/` (synced from CrispZotLib, where they are canonical). If it fails,
+  the two implementations diverged — fix the formatter or regenerate + sync the goldens
+  there, changing both languages in lockstep.
 
 ## Advanced Usage
 
