@@ -26,7 +26,7 @@ try:
 except ImportError:
     SICKLE_AVAILABLE = False
 
-from sru_library import BiblioRecord, map_dc_type, infer_document_type
+from sru_library import BiblioRecord, map_dc_type, infer_document_type, clean_person_name
 
 # Configure logging
 logging.basicConfig(
@@ -1606,6 +1606,12 @@ def parse_dublin_core(record, namespaces):
     )
     document_type = map_dc_type(dc_type_text) or infer_document_type(
         None, isbn, issn, None, format_str)
+
+    # Normalize creator names (strip life dates / BnF relator suffixes) — the OAI
+    # bracket-role logic above only removes [Übersetzer]-style markers.
+    authors = [clean_person_name(a) for a in authors]
+    editors = [clean_person_name(e) for e in editors]
+    translators = [clean_person_name(t) for t in translators]
 
     return BiblioRecord(
         id=record_id,
