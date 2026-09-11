@@ -94,25 +94,64 @@ class IxTheoClient:
             logger.error(f"Error initializing session: {e}")
     
     def _solve_pow_cookie(self):
-        """Solve IxTheo's JS proof-of-work "Verifying your browser" challenge
-        (PLAN 4.2). The page finds i such that sha256(nonce+ts+i) starts with
-        "0000", then sets a pow_token=nonce:ts:i cookie (valid 30 min). A plain
-        request with no cookie gets the challenge page instead of results, so we
-        compute the same token and set the cookie on the session."""
+        """Clear IxTheo's JS proof-of-work "Verifying your browser" wall
+        (PLAN 4.2; re-worked for issue #26).
+
+        The scheme changed: the page now finds the smallest ``i`` such that
+
+            sha256(nonce + i)  has >= DIFFICULTY_BITS leading zero bits
+
+        where ``nonce`` is **server-issued** (a locally invented nonce is
+        rejected, so the challenge page must be fetched first) and the cookie is
+        ``pow_token=<nonce>:<TS>:<i>``.  The token is single-use unless sent with
+        the server's session cookies, which a ``requests.Session`` keeps — so we
+        solve once, set the cookie, and let the session carry it alongside the
+        ``hmac`` cookie the server hands back.
+        """
         import hashlib
-        import uuid
-        nonce = str(uuid.uuid4())
-        ts = int(time.time())
+
+        # 1. Fetch the challenge page to obtain a server-issued nonce/TS.
+        try:
+            resp = self.session.get(self.base_url, timeout=self.timeout)
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error fetching IxTheo PoW challenge: {e}")
+            return
+        html = resp.text
+        if "DIFFICULTY_BITS" not in html and "Verifying your browser" not in html:
+            # No wall (already cleared, or scheme changed again) — nothing to do.
+            return
+
+        m_nonce = re.search(r'const\s+nonce\s*=\s*"([0-9a-fA-F]+)"', html)
+        m_ts = re.search(r'const\s+TS\s*=\s*"(\d+)"', html)
+        if not (m_nonce and m_ts):
+            logger.warning(
+                "IxTheo challenge page had no nonce/TS — the wall may have "
+                "changed again (PLAN 4.2 / issue #26)"
+            )
+            return
+        nonce = m_nonce.group(1)
+        ts = m_ts.group(1)
+        m_diff = re.search(r"const\s+DIFFICULTY_BITS\s*=\s*(\d+)", html)
+        difficulty_bits = int(m_diff.group(1)) if m_diff else 17
+
+        # 2. Find the smallest i whose digest has >= difficulty_bits leading zeros.
         i = 0
-        while i < 20_000_000:
-            if hashlib.sha256(f"{nonce}{ts}{i}".encode()).hexdigest().startswith("0000"):
+        while i < 100_000_000:
+            digest = hashlib.sha256(f"{nonce}{i}".encode()).digest()
+            value = (digest[0] << 16) | (digest[1] << 8) | digest[2]
+            leading = 24 - value.bit_length()  # value==0 -> 24
+            if leading >= difficulty_bits:
                 break
             i += 1
+
         domain = self.base_url.split("://")[-1].split("/")[0]
         self.session.cookies.set(
             "pow_token", f"{nonce}:{ts}:{i}", domain=domain, path="/"
         )
-        self._debug_print(f"Solved IxTheo proof-of-work challenge in {i} hashes")
+        self._debug_print(
+            f"Solved IxTheo proof-of-work challenge (i={i}, "
+            f"difficulty={difficulty_bits} bits)"
+        )
 
     def _extract_csrf_token(self, html_content):
         """
